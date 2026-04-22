@@ -58,6 +58,7 @@ All commands below must be run from this directory.
 
 ```bash
 docker compose up -d --build
+docker compose up -d kafka migration-coordinator
 ```
 
 Expected output: all containers transition to `Up` or `Up (healthy)`.
@@ -110,8 +111,8 @@ Expected: `mode: streambazaar | running: True`
 python3 scripts/run_workloads.py \
   --datasets iot-sensors \
   --tenant-ids tenant-iot \
-  --records-per-tenant 50000 \
-  --input-rate 100000 \
+  --records-per-tenant 500 \
+  --input-rate 100 \
   --duration-sec 180 \
   --disable-synthetic-fallback \
   --skip-download
@@ -163,8 +164,8 @@ Artifacts saved to: `evaluation/results/raw/exp_YYYYMMDD_HHMMSS/`
 ```bash
 python3 evaluation/run_true_baseline_measurements.py \
   --duration-sec 60 \
-  --input-rate 80000 \
-  --records-per-tenant 30000 \
+  --input-rate 800 \
+  --records-per-tenant 3000 \
   --dataset iot-sensors \
   --tenant-id tenant-iot
 ```

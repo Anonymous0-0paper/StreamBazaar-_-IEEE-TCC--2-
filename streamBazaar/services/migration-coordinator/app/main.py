@@ -38,15 +38,26 @@ MIGRATION_STATE_SIZE = Gauge(
     [],
 )
 MIGRATION_TRANSFER_TIME_TOTAL = Counter(
-    "streambazaar_mc_transfer_time_seconds_total",
+    "streambazaar_mc_transfer_time_accumulated_seconds",
     "Accumulated state transfer time across all migrations",
     ["tenant_id"],
 )
 MIGRATION_DOWNTIME_TOTAL = Counter(
-    "streambazaar_mc_downtime_seconds_total",
+    "streambazaar_mc_downtime_accumulated_seconds",
     "Accumulated service downtime across all migrations",
     ["tenant_id"],
 )
+
+# MIGRATION_TRANSFER_TIME_TOTAL = Counter(
+#     "streambazaar_mc_transfer_time_accumulated_seconds",
+#     # "Accumulated state transfer time across all migrations",
+#     ["tenant_id"],
+# )
+# MIGRATION_DOWNTIME_TOTAL = Counter(
+#     "streambazaar_mc_downtime_accumulated_seconds",
+#     # "Accumulated service downtime across all migrations",
+#     ["tenant_id"],
+# )
 
 # Set static state-size gauge once on startup
 MIGRATION_STATE_SIZE.set(STATE_SIZE_KB)
