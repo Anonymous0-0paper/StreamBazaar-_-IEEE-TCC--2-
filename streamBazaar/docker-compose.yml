@@ -1,0 +1,197 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  flink-jobmanager:
+    build:
+      context: .
+      dockerfile: ./services/flink-cluster/Dockerfile
+    command: jobmanager
+    ports:
+      - "18088:8081"
+      - "19249:9249"  # Prometheus metrics
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      STREAMBAZAAR_AUCTION_ENDPOINT: http://auction-orchestrator:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_INPUT_TOPIC_PATTERN: tenant\\..*\\.input
+      KAFKA_GROUP_ID: streambazaar-flink-job
+      ALLOC_TOPIC: streamBazaar.allocations
+    volumes:
+      - ./services/flink-cluster/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/v1/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  flink-taskmanager:
+    build:
+      context: .
+      dockerfile: ./services/flink-cluster/Dockerfile
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_INPUT_TOPIC_PATTERN: tenant\\..*\\.input
+      KAFKA_GROUP_ID: streambazaar-flink-job
+      ALLOC_TOPIC: streamBazaar.allocations
+    volumes:
+      - ./data:/tmp/data
+      - ./services/flink-cluster/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml
+
+  flink-job-submitter:
+    image: curlimages/curl:8.00.0
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./scripts/submit-flink-job.sh:/scripts/submit-flink-job.sh
+    entrypoint: /bin/sh
+    command: -c "chmod +x /scripts/submit-flink-job.sh && /scripts/submit-flink-job.sh flink-jobmanager 8081"
+
+
+  auction-orchestrator:
+    build: ./services/auction-orchestrator
+    ports:
+      - "18080:8080"
+    depends_on:
+      - redis
+
+  pricing-engine:
+    build: ./services/pricing-engine
+    ports:
+      - "18081:8081"
+    depends_on:
+      - redis
+
+  tenant-manager:
+    build: ./services/tenant-manager
+    ports:
+      - "18082:8082"
+    depends_on:
+      - postgres
+
+  resource-allocator:
+    build: ./services/resource-allocator
+    ports:
+      - "18083:8083"
+    depends_on:
+      - kafka
+
+  migration-coordinator:
+    build: ./services/migration-coordinator
+    ports:
+      - "18084:8084"
+    depends_on:
+      - kafka
+
+  stream-coordinator:
+    build: ./services/stream-coordinator
+    ports:
+      - "18085:8085"
+    depends_on:
+      - kafka
+      - auction-orchestrator
+      - pricing-engine
+      - resource-allocator
+      - migration-coordinator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TENANT_IDS: ${TENANT_IDS:-tenant-fraud,tenant-clickstream,tenant-ml,tenant-iot}
+      INPUT_TOPIC_TEMPLATE: ${INPUT_TOPIC_TEMPLATE:-tenant.{tenant_id}.input}
+      OUTPUT_TOPIC_TEMPLATE: ${OUTPUT_TOPIC_TEMPLATE:-tenant.{tenant_id}.output}
+      ALLOC_TOPIC: ${ALLOC_TOPIC:-streamBazaar.allocations}
+      PREEMPT_TOPIC: ${PREEMPT_TOPIC:-streamBazaar.preemptions}
+      METRICS_TOPIC: ${METRICS_TOPIC:-streamBazaar.metrics}
+      DEFAULT_SLA_TARGET_MS: ${DEFAULT_SLA_TARGET_MS:-200}
+      CLEAR_INTERVAL_SEC: ${CLEAR_INTERVAL_SEC:-1.0}
+      THROUGHPUT_PEAK_MSG_PER_SEC: ${THROUGHPUT_PEAK_MSG_PER_SEC:-1000}
+      NETWORK_CAPACITY_MBPS: ${NETWORK_CAPACITY_MBPS:-50}
+      SCHEDULER_MODE: ${SCHEDULER_MODE:-streambazaar}
+      FIXED_PARALLELISM_PER_TENANT: ${FIXED_PARALLELISM_PER_TENANT:-2}
+      TALOS_COOLDOWN_SEC: ${TALOS_COOLDOWN_SEC:-90}
+      TALOS_IDLE_THRESHOLD: ${TALOS_IDLE_THRESHOLD:-500}
+      DS2_MAX_SCALING_STEPS: ${DS2_MAX_SCALING_STEPS:-3}
+      DS2_STABILITY_SEC: ${DS2_STABILITY_SEC:-120}
+      CAPSYS_REBALANCE_SEC: ${CAPSYS_REBALANCE_SEC:-30}
+      CAPSYS_CONTENTION_THRESHOLD: ${CAPSYS_CONTENTION_THRESHOLD:-0.75}
+      PRICING_URL: http://pricing-engine:8081/price
+      BID_URL: http://auction-orchestrator:8080/bid
+      CLEAR_URL: http://auction-orchestrator:8080/auction/clear
+      ALLOCATE_URL: http://resource-allocator:8083/allocate
+      MIGRATE_URL: http://migration-coordinator:8084/migrate
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: streamBazaar
+      POSTGRES_USER: sb_user
+      POSTGRES_PASSWORD: sb_pass
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "18086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminadmin
+      DOCKER_INFLUXDB_INIT_ORG: evaluation
+      DOCKER_INFLUXDB_INIT_BUCKET: streamBazaar
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: streamBazaar-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  prometheus:
+    build: ./services/monitoring
+    ports:
+      - "19090:9090"
+    depends_on:
+      - auction-orchestrator
+      - pricing-engine
+      - tenant-manager
+
+  grafana:
+    image: grafana/grafana:9.0.0
+    ports:
+      - "13000:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning
+
+volumes:
+  redis_data:
+  postgres_data:
+  influxdb_data:
+  grafana_data:

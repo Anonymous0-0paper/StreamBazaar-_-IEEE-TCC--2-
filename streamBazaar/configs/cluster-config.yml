@@ -1,0 +1,18 @@
+cluster:
+  name: streamBazaar-local
+  scheduler_mode: auction
+  default_taskmanagers: 1
+  enable_preemption: true
+
+paper_alignment:
+  objectives:
+    - latency_aware_allocation
+    - tenant_fairness
+    - resource_efficiency
+  metrics:
+    - p50_latency_ms
+    - p99_latency_ms
+    - throughput_rps
+    - cpu_percent
+    - memory_percent
+    - auction_revenue

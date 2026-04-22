@@ -1,0 +1,109 @@
+{
+  "decisions": {
+    "TALOS": {
+      "source": {
+        "task_id": "source",
+        "action": "scale_up",
+        "from_parallelism": 2,
+        "to_parallelism": 3,
+        "reason": "lag growth with bottleneck signature"
+      }
+    },
+    "DS2": {
+      "source": {
+        "operator_id": "source",
+        "from_parallelism": 2,
+        "to_parallelism": 5,
+        "reason": "capacity bottleneck under required throughput"
+      },
+      "map": {
+        "operator_id": "map",
+        "from_parallelism": 3,
+        "to_parallelism": 6,
+        "reason": "capacity bottleneck under required throughput"
+      },
+      "sink": {
+        "operator_id": "sink",
+        "from_parallelism": 2,
+        "to_parallelism": 5,
+        "reason": "capacity bottleneck under required throughput"
+      }
+    },
+    "CAPSys": {
+      "sink": {
+        "task_id": "sink",
+        "action": "rebalance_down",
+        "from_parallelism": 2,
+        "to_parallelism": 1,
+        "contention_score": 0.152
+      }
+    },
+    "FlinkDefault": {
+      "parallelism": {
+        "source": 2,
+        "map": 3,
+        "sink": 2
+      },
+      "assigned_subtasks": 7
+    }
+  },
+  "profiles": {
+    "StreamBazaar": {
+      "avg_utilization": 0.7333333333333333,
+      "p99_latency": 131.25,
+      "avg_throughput": 15006.0,
+      "fairness_index": 1.0
+    },
+    "TALOS": {
+      "avg_utilization": 0.6933333333333332,
+      "p99_latency": 147.0,
+      "avg_throughput": 13776.000000000002,
+      "fairness_index": 1.0
+    },
+    "DS2": {
+      "avg_utilization": 0.6633333333333333,
+      "p99_latency": 157.5,
+      "avg_throughput": 14267.999999999998,
+      "fairness_index": 0.9678550440744368
+    },
+    "CAPSys": {
+      "avg_utilization": 0.6733333333333333,
+      "p99_latency": 154.0,
+      "avg_throughput": 13898.999999999998,
+      "fairness_index": 0.9978550440744368
+    },
+    "FlinkDefault": {
+      "avg_utilization": 0.5833333333333333,
+      "p99_latency": 189.0,
+      "avg_throughput": 11070.0,
+      "fairness_index": 0.9878550440744368
+    }
+  },
+  "improvements_vs_flink_default": {
+    "StreamBazaar": {
+      "resource_utilization_improvement_pct": 25.714285714285722,
+      "latency_improvement_pct": 30.555555555555557,
+      "throughput_improvement_pct": 35.55555555555556,
+      "fairness_improvement": 0.012144955925563194
+    },
+    "TALOS": {
+      "resource_utilization_improvement_pct": 18.857142857142858,
+      "latency_improvement_pct": 22.22222222222222,
+      "throughput_improvement_pct": 24.44444444444446,
+      "fairness_improvement": 0.012144955925563194
+    },
+    "DS2": {
+      "resource_utilization_improvement_pct": 13.71428571428573,
+      "latency_improvement_pct": 16.666666666666664,
+      "throughput_improvement_pct": 28.888888888888875,
+      "fairness_improvement": -0.020000000000000018
+    },
+    "CAPSys": {
+      "resource_utilization_improvement_pct": 15.428571428571445,
+      "latency_improvement_pct": 18.51851851851852,
+      "throughput_improvement_pct": 25.555555555555536,
+      "fairness_improvement": 0.010000000000000009
+    }
+  },
+  "metrics_by_scheduler": {}
+}

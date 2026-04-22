@@ -1,0 +1,78 @@
+{
+  "run_dir": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926",
+  "mode_csv": {
+    "streambazaar": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/csv/streambazaar/prometheus_metrics_20260420_074931.csv",
+    "talos": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/csv/talos/prometheus_metrics_20260420_075036.csv",
+    "ds2": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/csv/ds2/prometheus_metrics_20260420_075141.csv",
+    "capsys": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/csv/capsys/prometheus_metrics_20260420_075246.csv",
+    "flink_default": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/csv/flink_default/prometheus_metrics_20260420_075351.csv"
+  },
+  "mode_kpis": {
+    "streambazaar": {
+      "latency_p50": 0.0018081726204265249,
+      "latency_p90": 0.003263494557467374,
+      "latency_p95": 0.003447880878231742,
+      "latency_p99": 0.0035793858189149333,
+      "latency_p999": 0.0036049324656703256,
+      "throughput": 75.87311509922779,
+      "rue": 0.8466695240778415,
+      "eei": 0.9905660377358491,
+      "fpp": 0.02866811612676451,
+      "mis": 4.811195910801678,
+      "tlvr": 0.1408839779005525
+    },
+    "talos": {
+      "latency_p50": 0.0004431568430020259,
+      "latency_p90": 0.0006935278929196871,
+      "latency_p95": 0.0007119472930064569,
+      "latency_p99": 0.0007227478004418887,
+      "latency_p999": 0.0007258059754738441,
+      "throughput": 7.745148090407741,
+      "rue": 0.06103031321979177,
+      "eei": 0.1895037424449189,
+      "fpp": 0.007559390473605281,
+      "mis": 0.918157587830837,
+      "tlvr": 0.0
+    },
+    "ds2": {
+      "latency_p50": 0.0003772870459646549,
+      "latency_p90": 0.0005397205523724826,
+      "latency_p95": 0.0005772696735723964,
+      "latency_p99": 0.0005838532068144599,
+      "latency_p999": 0.0005858835660691533,
+      "throughput": 7.791502359308259,
+      "rue": 0.28917502533118855,
+      "eei": 0.9465408805031446,
+      "fpp": 0.007195108213377894,
+      "mis": 0.6863892292076685,
+      "tlvr": 0.0
+    },
+    "capsys": {
+      "latency_p50": 0.00039825122761276535,
+      "latency_p90": 0.0006125220986512992,
+      "latency_p95": 0.0006206140431073996,
+      "latency_p99": 0.0006277694831444667,
+      "latency_p999": 0.0006300627608482654,
+      "throughput": 7.791233740628031,
+      "rue": 0.07530548181189571,
+      "eei": 0.3821912701124039,
+      "fpp": 0.007495079108697272,
+      "mis": 0.7938791221042849,
+      "tlvr": 0.0
+    },
+    "flink_default": {
+      "latency_p50": 0.0003795305765592135,
+      "latency_p90": 0.0005528052499661079,
+      "latency_p95": 0.0005769845141814305,
+      "latency_p99": 0.0005840782441084201,
+      "latency_p999": 0.0005854586178660393,
+      "throughput": 7.743472197328891,
+      "rue": 0.13600572586020884,
+      "eei": 0.5915903540903541,
+      "fpp": 0.007370339901372293,
+      "mis": 0.7073014205464949,
+      "tlvr": 0.0
+    }
+  },
+  "report_txt": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/true_baseline_runs/run_20260420_094926/true_measured_improvement_report.txt"
+}

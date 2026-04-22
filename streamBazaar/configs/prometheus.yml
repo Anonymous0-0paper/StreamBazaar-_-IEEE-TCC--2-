@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 10s
+
+scrape_configs:
+  - job_name: 'streambazaar-services'
+    static_configs:
+      - targets:
+          - auction-orchestrator:8080
+          - pricing-engine:8081
+          - tenant-manager:8082
+          - resource-allocator:8083
+          - migration-coordinator:8084
+          - stream-coordinator:8085

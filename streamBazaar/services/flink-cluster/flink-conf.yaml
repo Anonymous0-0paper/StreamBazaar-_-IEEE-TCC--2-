@@ -1,0 +1,41 @@
+# StreamBazaar Flink Configuration
+# Tuned for the auction-driven resource allocation workload
+
+# Job Manager
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.bind-host: 0.0.0.0
+jobmanager.memory.process.size: 2g
+jobmanager.memory.jvm-overhead.fraction: 0.1
+
+# Task Manager
+taskmanager.bind-host: 0.0.0.0
+taskmanager.memory.process.size: 2g
+taskmanager.memory.managed.size: 512m
+taskmanager.memory.jvm-overhead.fraction: 0.1
+taskmanager.numberOfTaskSlots: 4
+
+# Streaming
+execution.checkpointing.interval: 10s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.timeout: 60s
+execution.checkpointing.min-pause: 5s
+state.backend: rocksdb
+state.checkpoints.dir: file:///tmp/flink/checkpoints
+
+# Metrics (emit to Prometheus)
+metrics.reporter.prometheus.class: org.apache.flink.metrics.prometheus.PrometheusReporter
+metrics.reporter.prometheus.port: 9249
+metrics.reporter.prometheus.host: 0.0.0.0
+
+# Kafka integration
+connector.kafka.worker.thread.num: 4
+
+# Network
+taskmanager.network.memory.min: 64mb
+taskmanager.network.memory.max: 512mb
+
+# Logging
+taskmanager.log.dirs: /opt/flink/log
+blob.server.port: 6124
+query.server.port: 6125

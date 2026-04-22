@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 evaluation/run_state_migration_benchmark.py --state-sizes-kb 64,256,512,1024,2048,4096,8192 --modes streambazaar,flink_default --duration-sec 40 --input-rate 60000 --records-per-tenant 20000 --tenant-id tenant-iot --dataset iot-sensors --out-dir evaluation/results/state_migration_live)"
+    ]
+  }
+}

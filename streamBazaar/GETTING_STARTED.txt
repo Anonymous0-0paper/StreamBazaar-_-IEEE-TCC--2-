@@ -1,0 +1,227 @@
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║                                                                            ║
+║   ✅ STREAMBAZAAR METRICS COLLECTION SYSTEM - COMPLETE & READY           ║
+║                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📊 QUICK ACCESS
+
+┌─ RUN 3-MIN AUTO-COLLECT (EASIEST) ────────────────────────────────────┐
+│                                                                         │
+│  $ bash scripts/collect_metrics_3min.sh                                │
+│                                                                         │
+│  ✓ Starts workload automatically for 3 minutes                        │
+│  ✓ Collects all latency, throughput, resource metrics                │
+│  ✓ Saves to: metrics_export_YYYYMMDD_HHMMSS/ (15+ CSV files)        │
+│  ✓ Analyze in Excel or Python                                        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─ RUN CONTINUOUS (UNTIL YOU STOP) ─────────────────────────────────────┐
+│                                                                         │
+│  $ python3 scripts/continuous_collector.py                            │
+│  $ python3 scripts/run_workloads.py --duration-sec 600               │
+│                                                                         │
+│  ✓ Collects every 30 seconds until Ctrl+C                            │
+│  ✓ Saves all data points to single CSV                               │
+│  ✓ Perfect for watching trends over long experiments                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─ WATCH LIVE IN BROWSER ───────────────────────────────────────────────┐
+│                                                                         │
+│  Prometheus Queries:   http://localhost:19090/graph                  │
+│  Grafana Dashboard:    http://localhost:13000 (admin/admin)          │
+│                                                                         │
+│  ✓ 50+ metrics available to query                                    │
+│  ✓ 12-panel pre-configured dashboard                                 │
+│  ✓ Auto-refresh every 5 seconds                                      │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 DOCUMENTATION CREATED (Read in Order)
+
+  1. START_HERE.md ⭐ (READ THIS FIRST)
+     └─ Overview of all options + quick start
+
+  2. QUICK_START_METRICS.md
+     └─ 4 different ways to collect data
+
+  3. PROMETHEUS_QUERIES_GUIDE.md
+     └─ 20+ queries to paste in browser + how to export CSV
+
+  4. METRICS_COLLECTION_COMPLETE.md
+     └─ Analysis examples + expected results + troubleshooting
+
+  5. MONITORING.md
+     └─ Complete reference: all 50+ metrics explained
+
+  6. PARAMETER_TUNING.md
+     └─ How to change system and observe metric effects
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🛠️ COLLECTION SCRIPTS CREATED
+
+  scripts/collect_metrics_3min.sh     [3.5K] ← MAIN SCRIPT
+  scripts/collect_3min.sh              [383B] ← Simplified version
+  scripts/continuous_collector.py     [2.3K] ← Continuous collection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ WHAT YOU GET
+
+Auto-Collect Output (metrics_export_YYYYMMDD_HHMMSS/):
+  ✓ p50_latency.csv           ← 50th percentile latency
+  ✓ p99_latency.csv           ← 99th percentile (SLA metric) ⭐
+  ✓ p999_latency.csv          ← 99.9th percentile
+  ✓ rue_efficiency.csv        ← Resource utilization (RUE) ⭐
+  ✓ tlvr_violations.csv       ← SLA violation rate ⭐
+  ✓ system_throughput.csv     ← Messages/second
+  ✓ eei_index.csv             ← Economic efficiency
+  ✓ fpp_product.csv           ← Fairness metric
+  ✓ mis_score.csv             ← Migration impact
+  ✓ cpu_util.csv              ← CPU %
+  ✓ memory_util.csv           ← Memory %
+  ✓ network_util.csv          ← Network %
+  ✓ total_backlog.csv         ← Queue backlog
+  ✓ clearing_cycles.csv       ← Auction events
+  + 2-3 more files
+
+CSV Format (easy to load in Excel/Python):
+  tenant_id,timestamp,value
+  cluster,1711357200.5,125.3
+  cluster,1711357205.5,127.8
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 RECOMMENDED NEXT STEPS
+
+OPTION A (Fastest - 5 minutes):
+  1. bash scripts/collect_metrics_3min.sh
+  2. Wait for completion
+  3. Open metrics_export_YYYYMMDD_HHMMSS/
+  4. Load p99_latency.csv in Excel
+  5. Create chart to see latency trend
+
+OPTION B (Watch Live - 10 minutes):
+  1. Open http://localhost:13000 in browser
+  2. bash scripts/collect_metrics_3min.sh (in terminal)
+  3. Watch Grafana dashboard panels update every 5 seconds
+  4. See real-time metrics as they collect
+
+OPTION C (Continuous Monitoring - 30+ minutes):
+  1. python3 scripts/continuous_collector.py (Terminal 1)
+  2. python3 scripts/run_workloads.py --duration-sec 600 (Terminal 2)
+  3. Run different workloads back-to-back
+  4. All metrics in single CSV file
+  5. Analyze with Python for correlations
+
+OPTION D (Browser Queries):
+  1. Open http://localhost:19090/graph
+  2. Paste: streambazaar_latency_p99_ms
+  3. Click "Table" tab
+  4. Copy → Paste into Excel
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 KEY METRICS TO TRACK
+
+  ⭐ P99 LATENCY (streambazaar_latency_p99_ms)
+     └─ Most important SLA metric
+     └─ Target: <200ms
+     └─ High = system under pressure
+
+  ⭐ RESOURCE UTILIZATION (RUE) (streambazaar_resource_utilization_efficiency)
+     └─ % of resources being used
+     └─ Target: 60-80%
+     └─ >90% = overloaded, <30% = underutilized
+
+  ⭐ TAIL LATENCY VIOLATION RATE (TLVR) (streambazaar_tail_latency_violation_rate)
+     └─ % of time SLA is violated
+     └─ Target: <0.1 (10% or less)
+     └─ 0 = perfect SLA compliance
+
+  THROUGHPUT (streambazaar_system_throughput_msgs_per_sec)
+     └─ Messages processed per second
+     └─ Should correlate with load
+
+  BACKLOG (sum(streambazaar_tenant_backlog))
+     └─ Messages waiting in queue
+     └─ Target: 0 (system keeping up)
+     └─ >100 = system overwhelmed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 EXPECTED RESULTS (3-minute run)
+
+Low Load:
+  P99 Latency:       50-100 ms
+  RUE:               20-40%
+  Throughput:        1-10 msgs/sec
+  TLVR:              0.0 (no violations)
+  Backlog:           0
+
+Moderate Load (100K msgs/sec):
+  P99 Latency:       100-200 ms
+  RUE:               50-70%
+  Throughput:        100,000 msgs/sec
+  TLVR:              0.01-0.05
+  Backlog:           0-100
+
+High Load (250K msgs/sec):
+  P99 Latency:       200-400 ms
+  RUE:               80-95%
+  Throughput:        250,000 msgs/sec
+  TLVR:              0.15-0.35
+  Backlog:           100-1000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 QUICK PYTHON ANALYSIS
+
+from pandas import read_csv
+
+# Load metrics
+p99 = read_csv('metrics_export_XXX/p99_latency.csv')
+rue = read_csv('metrics_export_XXX/rue_efficiency.csv')
+
+# Statistics
+print(f"P99 Latency - Min: {p99['value'].min():.1f}, Max: {p99['value'].max():.1f}, Avg: {p99['value'].mean():.1f}")
+print(f"RUE - Min: {rue['value'].min():.1f}%, Max: {rue['value'].max():.1f}%, Avg: {rue['value'].mean():.1f}%")
+
+# Correlation
+print(f"P99 vs Throughput correlation: {p99['value'].corr(throughput['value']):.2f}")
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚨 TROUBLESHOOTING
+
+Q: Prometheus returns "No data"?
+A: Check http://localhost:19090/targets (should show 6 "UP")
+   If not: docker compose restart stream-coordinator
+
+Q: Grafana dashboard empty?
+A: Click settings → Datasources → Test Prometheus connection
+
+Q: Script fails?
+A: Ensure workload can run: python3 scripts/run_workloads.py --help
+   Check Docker: docker compose ps (should show 15 "Up")
+
+Q: Collection very slow?
+A: Prometheus scrapes every 5 seconds - wait for data
+   Grafana refreshes every 5 seconds - watch for updates
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎬 START NOW
+
+  1. bash scripts/collect_metrics_3min.sh
+  
+  Done! CSVs saved. Open in Excel or Python.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+

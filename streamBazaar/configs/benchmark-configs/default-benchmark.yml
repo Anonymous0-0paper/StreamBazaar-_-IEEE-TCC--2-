@@ -1,0 +1,19 @@
+benchmark:
+  duration_minutes: 60
+  sampling:
+    latency_ms: 100
+    throughput_sec: 10
+    resource_sec: 5
+  workloads:
+    fraud_detection:
+      enabled: true
+      input_rate: 3000
+      tenant_id: tenant-fraud
+    clickstream_analytics:
+      enabled: true
+      input_rate: 5000
+      tenant_id: tenant-clickstream
+    ml_inference:
+      enabled: true
+      input_rate: 1200
+      tenant_id: tenant-ml

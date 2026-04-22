@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'auction-orchestrator'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['auction-orchestrator:8080']
+
+  - job_name: 'pricing-engine'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['pricing-engine:8081']
+
+  - job_name: 'tenant-manager'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['tenant-manager:8082']
+
+  - job_name: 'resource-allocator'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['resource-allocator:8083']
+
+  - job_name: 'migration-coordinator'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['migration-coordinator:8084']
+
+  - job_name: 'stream-coordinator'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['stream-coordinator:8085']

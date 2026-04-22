@@ -1,0 +1,45 @@
+True Measured StreamBazaar vs Baselines Report (FIXED - Latency in milliseconds)
+Generated: 2026-03-25T13:57:26 (corrected)
+
+KPIs: latency p50-p999 (ms), throughput (msgs/sec), RUE, EEI, FPP, MIS, TLVR
+Rules: lower-is-better for latency/TLVR/MIS; higher-is-better for throughput/RUE/EEI/FPP
+
+=== StreamBazaar vs talos (true measured, corrected) ===
+latency_p50: StreamBazaar=9.086249, talos=9.138809, improvement=0.575% (lower-better)
+latency_p90: StreamBazaar=9.088540, talos=9.140448, improvement=0.568% (lower-better)
+latency_p95: StreamBazaar=9.088821, talos=9.140478, improvement=0.565% (lower-better)
+latency_p99: StreamBazaar=9.089063, talos=9.140491, improvement=0.563% (lower-better)
+latency_p999: StreamBazaar=9.089116, talos=9.140494, improvement=0.562% (lower-better)
+throughput: StreamBazaar=745.790606, talos=2096.038905, improvement=-64.419% (higher-better)
+rue: StreamBazaar=8.123604, talos=7.280193, improvement=11.585% (higher-better)
+eei: StreamBazaar=0.966667, talos=0.066667, improvement=1350.000% (higher-better)
+fpp: StreamBazaar=0.261776, talos=0.866134, improvement=-69.777% (higher-better)
+mis: StreamBazaar=45350.653739, talos=45640.027904, improvement=0.634% (lower-better)
+tlvr: StreamBazaar=0.440169, talos=0.436107, improvement=-0.931% (lower-better)
+
+=== StreamBazaar vs ds2 (true measured, corrected) ===
+latency_p50: StreamBazaar=9.086249, ds2=9.178528, improvement=1.005% (lower-better)
+latency_p90: StreamBazaar=9.088540, ds2=9.179171, improvement=0.987% (lower-better)
+latency_p95: StreamBazaar=9.088821, ds2=9.179202, improvement=0.985% (lower-better)
+latency_p99: StreamBazaar=9.089063, ds2=9.179244, improvement=0.982% (lower-better)
+latency_p999: StreamBazaar=9.089116, ds2=9.179247, improvement=0.982% (lower-better)
+throughput: StreamBazaar=745.790606, ds2=2172.736259, improvement=-65.675% (higher-better)
+rue: StreamBazaar=8.123604, ds2=7.500850, improvement=8.302% (higher-better)
+eei: StreamBazaar=0.966667, ds2=0.710692, improvement=36.018% (higher-better)
+fpp: StreamBazaar=0.261776, ds2=0.418172, improvement=-37.400% (higher-better)
+mis: StreamBazaar=45350.653739, ds2=45852.928002, improvement=1.095% (lower-better)
+tlvr: StreamBazaar=0.440169, ds2=0.436280, improvement=-0.891% (lower-better)
+
+=== StreamBazaar vs flink_default (true measured, corrected) ===
+latency_p50: StreamBazaar=9.086249, flink_default=9.215089, improvement=1.398% (lower-better)
+latency_p90: StreamBazaar=9.088540, flink_default=9.216834, improvement=1.392% (lower-better)
+latency_p95: StreamBazaar=9.088821, flink_default=9.216867, improvement=1.389% (lower-better)
+latency_p99: StreamBazaar=9.089063, flink_default=9.216877, improvement=1.387% (lower-better)
+latency_p999: StreamBazaar=9.089116, flink_default=9.216880, improvement=1.386% (lower-better)
+throughput: StreamBazaar=745.790606, flink_default=2106.933489, improvement=-64.603% (higher-better)
+rue: StreamBazaar=8.123604, flink_default=7.131907, improvement=13.905% (higher-better)
+eei: StreamBazaar=0.966667, flink_default=0.066667, improvement=1350.000% (higher-better)
+fpp: StreamBazaar=0.261776, flink_default=0.866134, improvement=-69.777% (higher-better)
+mis: StreamBazaar=45350.653739, flink_default=46010.105026, improvement=1.433% (lower-better)
+tlvr: StreamBazaar=0.440169, flink_default=0.434614, improvement=-1.278% (lower-better)
+

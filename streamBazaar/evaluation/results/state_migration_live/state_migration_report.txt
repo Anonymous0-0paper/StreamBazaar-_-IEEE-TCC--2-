@@ -1,0 +1,55 @@
+StreamBazaar — State Migration Cost Report
+Generated: 2026-04-20T15:35:08.228506
+
+Metrics
+  downtime_sec     : service interruption during migration (lower is better)
+  transfer_time_sec: time to transfer operator state    (lower is better)
+
+=== Downtime (sec) by state size ===
+State (KB)            streambazaar       flink_default
+------------------------------------------------------
+64                        0.003475            0.106250
+256                       0.004300            0.125000
+512                       0.005400            0.150000
+1024                      0.007600            0.200000
+2048                      0.012000            0.300000
+4096                      0.020800            0.500000
+8192                      0.038400            0.900000
+
+=== Transfer Time (sec) by state size ===
+State (KB)            streambazaar       flink_default
+------------------------------------------------------
+64                        0.043438            0.106250
+256                       0.053750            0.125000
+512                       0.067500            0.150000
+1024                      0.095000            0.200000
+2048                      0.150000            0.300000
+4096                      0.260000            0.500000
+8192                      0.480000            0.900000
+
+=== StreamBazaar improvement vs Flink Default ===
+State (KB)          DT reduction      TT reduction    DT ratio    TT ratio
+--------------------------------------------------------------------------
+64                         96.7%             59.1%       30.58x        2.45x
+256                        96.6%             57.0%       29.07x        2.33x
+512                        96.4%             55.0%       27.78x        2.22x
+1024                       96.2%             52.5%       26.32x        2.11x
+2048                       96.0%             50.0%       25.00x        2.00x
+4096                       95.8%             48.0%       24.04x        1.92x
+8192                       95.7%             46.7%       23.44x        1.88x
+
+=== Data source per entry (live=measured, model=analytical) ===
+  mode=streambazaar     state=    64KB source=model  migrations=0
+  mode=streambazaar     state=   256KB source=model  migrations=0
+  mode=streambazaar     state=   512KB source=model  migrations=0
+  mode=streambazaar     state=  1024KB source=model  migrations=0
+  mode=streambazaar     state=  2048KB source=model  migrations=0
+  mode=streambazaar     state=  4096KB source=model  migrations=0
+  mode=streambazaar     state=  8192KB source=model  migrations=0
+  mode=flink_default    state=    64KB source=model  migrations=0
+  mode=flink_default    state=   256KB source=model  migrations=0
+  mode=flink_default    state=   512KB source=model  migrations=0
+  mode=flink_default    state=  1024KB source=model  migrations=0
+  mode=flink_default    state=  2048KB source=model  migrations=0
+  mode=flink_default    state=  4096KB source=model  migrations=0
+  mode=flink_default    state=  8192KB source=model  migrations=0

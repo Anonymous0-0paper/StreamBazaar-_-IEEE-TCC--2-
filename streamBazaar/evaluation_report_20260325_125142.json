@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-03-25T12:51:41.795369",
+  "window": {
+    "start": "2026-03-25T12:51:21.742583",
+    "end": "2026-03-25T12:51:33.742583"
+  },
+  "tenants": {
+    "tenant-fraud": {
+      "latency": {
+        "p50": 5972173.328745365,
+        "p90": 5976911.774170399,
+        "p95": 5981663.01087141,
+        "p99": 5981663.01087141,
+        "p99_9": 5981663.01087141,
+        "mean": 5971281.122137932,
+        "max": 5981663.01087141
+      },
+      "throughput": {
+        "avg_throughput": 774.8140235480863,
+        "max_throughput": 804.373618551582,
+        "min_throughput": 737.2480285051198,
+        "throughput_variance": 511.3220930594026
+      },
+      "resource_usage": {
+        "cpu_percent": 66.65913477509238,
+        "memory_percent": 0.11120685840135625,
+        "network_percent": 9.533888302068986,
+        "cpu_peak": 67.84234982286321,
+        "memory_peak": 0.11466513098768505,
+        "network_peak": 9.897844871957155
+      }
+    },
+    "tenant-clickstream": {
+      "latency": {},
+      "throughput": {
+        "avg_throughput": 0.9996972252518068,
+        "max_throughput": 0.9999110777778599,
+        "min_throughput": 0.9995210081991005,
+        "throughput_variance": 2.1631289280152253e-08
+      },
+      "resource_usage": {
+        "cpu_percent": 0.08605699173094486,
+        "memory_percent": 0.00014365235026394027,
+        "network_percent": 0.0029705387756020544,
+        "cpu_peak": 0.08922575891032171,
+        "memory_peak": 0.00015377822204927703,
+        "network_peak": 0.0030557282536891398
+      }
+    },
+    "tenant-ml": {
+      "latency": {},
+      "throughput": {
+        "avg_throughput": 0.9996972252518068,
+        "max_throughput": 0.9999110777778599,
+        "min_throughput": 0.9995210081991005,
+        "throughput_variance": 2.1631289280152253e-08
+      },
+      "resource_usage": {
+        "cpu_percent": 0.08605699173094486,
+        "memory_percent": 0.00014365235026394027,
+        "network_percent": 0.0028357223355329,
+        "cpu_peak": 0.08922575891032171,
+        "memory_peak": 0.00015377822204927703,
+        "network_peak": 0.0029117410584891283
+      }
+    }
+  },
+  "cluster_metrics": {
+    "cpu_percent": 6.0,
+    "memory_percent": 24.8,
+    "disk_io_read": 9435632640.0,
+    "disk_io_write": 55644431360.0,
+    "network_io_sent": 137163190372.0,
+    "network_io_recv": 52227595303.0
+  },
+  "advanced_kpis": {
+    "resource_utilization_efficiency": 8.593570789231695,
+    "tail_latency_violation_rate": 0.4972677595628415,
+    "economic_efficiency_index": 0.9666666666666667,
+    "fairness_performance_product": 0.28304055061785444,
+    "migration_impact_score": 29124.32746033118
+  }
+}

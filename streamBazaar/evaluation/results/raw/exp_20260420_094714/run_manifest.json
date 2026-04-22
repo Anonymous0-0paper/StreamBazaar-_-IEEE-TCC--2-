@@ -1,0 +1,25 @@
+{
+  "runs": [
+    {
+      "run": 1,
+      "warmup_sec": 15,
+      "steady_sec": 30,
+      "records_per_tenant": 150,
+      "report": "evaluation/results/raw/exp_20260420_094714/run_01_evaluation_report_20260420_094811.json"
+    },
+    {
+      "run": 2,
+      "warmup_sec": 15,
+      "steady_sec": 30,
+      "records_per_tenant": 150,
+      "report": "evaluation/results/raw/exp_20260420_094714/run_02_evaluation_report_20260420_094858.json"
+    }
+  ],
+  "csv_files": [
+    "evaluation/results/raw/exp_20260420_094714/csv/prometheus_metrics_20260420_074740.csv",
+    "evaluation/results/raw/exp_20260420_094714/csv/prometheus_metrics_20260420_074827.csv"
+  ],
+  "summary": "evaluation/results/raw/exp_20260420_094714/summary.json",
+  "figures": "evaluation/results/raw/exp_20260420_094714/figures",
+  "publication_figures": "evaluation/results/raw/exp_20260420_094714/figures_publication"
+}

@@ -1,0 +1,24 @@
+tenants:
+  - id: tenant-fraud
+    name: Fraud Detection Tenant
+    priority_weight: 1.3
+    virtual_currency_balance: 100000
+    sla_requirements:
+      p99_latency_ms: 200
+      min_throughput_rps: 5000
+
+  - id: tenant-clickstream
+    name: Clickstream Analytics Tenant
+    priority_weight: 1.0
+    virtual_currency_balance: 75000
+    sla_requirements:
+      p99_latency_ms: 300
+      min_throughput_rps: 8000
+
+  - id: tenant-ml
+    name: ML Inference Tenant
+    priority_weight: 1.5
+    virtual_currency_balance: 120000
+    sla_requirements:
+      p99_latency_ms: 150
+      min_throughput_rps: 2000

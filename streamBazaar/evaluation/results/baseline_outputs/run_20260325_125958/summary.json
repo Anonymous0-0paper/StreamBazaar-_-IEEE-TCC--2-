@@ -1,0 +1,21 @@
+{
+  "input": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/baseline_comparison_results.json",
+  "output_dir": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/baseline_outputs/run_20260325_125958",
+  "schedulers": [
+    "DS2",
+    "FlinkDefault",
+    "StreamBazaar",
+    "TALOS"
+  ],
+  "metric_count_per_scheduler": {
+    "StreamBazaar": 80,
+    "TALOS": 80,
+    "DS2": 80,
+    "FlinkDefault": 80
+  },
+  "artifacts": {
+    "per_scheduler_dir": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/baseline_outputs/run_20260325_125958/per_scheduler",
+    "kpi_comparison_table": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/baseline_outputs/run_20260325_125958/kpi_comparison_table.csv",
+    "improvement_report": "/home/user/Downloads/StreamBazaar _ IEEE TCC (2)/streamBazaar/evaluation/results/baseline_outputs/run_20260325_125958/streambazaar_improvement_report.txt"
+  }
+}

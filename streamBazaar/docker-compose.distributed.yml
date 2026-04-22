@@ -1,0 +1,174 @@
+# StreamBazaar distributed deployment template.
+#
+# Architecture:
+#   infra-node  : Kafka, Zookeeper, Redis, Postgres, Prometheus, Grafana,
+#                 auction-orchestrator (1 global clearinghouse)
+#   worker-nodes: stream-coordinator + pricing-engine + resource-allocator
+#                 + migration-coordinator, each handling its TENANT_IDS shard
+#
+# Usage (single machine, scale via replicas):
+#   NODE_COUNT=4 INFRA_HOST=localhost bash scripts/run-distributed.sh
+#
+# Usage (real multi-node Docker Swarm):
+#   docker swarm init
+#   docker stack deploy -c docker-compose.distributed.yml sb
+#
+# Environment variables consumed by worker services:
+#   TENANT_IDS           — comma-separated list of tenants this shard owns
+#   INFRA_HOST           — hostname/IP of the infra node (default: infra)
+#   KAFKA_BOOTSTRAP      — Kafka address (default: ${INFRA_HOST}:9092)
+#   REDIS_URL            — Redis address (default: redis://${INFRA_HOST}:6379/0)
+#   SCHEDULER_MODE       — streambazaar | talos | ds2 | capsys | flink_default
+#   NODE_ID              — unique integer id for this node (for port offset)
+
+services:
+
+  # ── Infrastructure (runs once, on the infra node) ─────────────────────────
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on: [zookeeper]
+    ports:
+      - "19092:19092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Enough partitions for max node count (16). Topics must be pre-created
+      # or auto-created with this default partition count.
+      KAFKA_NUM_PARTITIONS: 16
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: streamBazaar
+      POSTGRES_USER: sb_user
+      POSTGRES_PASSWORD: sb_pass
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  # Global auction clearinghouse — single instance, uses Redis for shared bid state
+  auction-orchestrator:
+    build: ./services/auction-orchestrator
+    ports:
+      - "18080:8080"
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on: [redis]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  prometheus:
+    build: ./services/monitoring
+    ports:
+      - "19090:9090"
+    depends_on: [auction-orchestrator]
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  grafana:
+    image: grafana/grafana:9.0.0
+    ports:
+      - "13000:3000"
+    depends_on: [prometheus]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  # ── Worker services (replicated across N worker nodes) ────────────────────
+  #
+  # In Swarm mode: set deploy.replicas to your node count.
+  # Each replica gets its TENANT_IDS shard via the scale script which
+  # generates per-node compose overrides.
+
+  pricing-engine:
+    build: ./services/pricing-engine
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on: [redis]
+    deploy:
+      replicas: ${NODE_COUNT:-1}
+
+  resource-allocator:
+    build: ./services/resource-allocator
+    deploy:
+      replicas: ${NODE_COUNT:-1}
+
+  migration-coordinator:
+    build: ./services/migration-coordinator
+    depends_on: [kafka]
+    deploy:
+      replicas: ${NODE_COUNT:-1}
+
+  tenant-manager:
+    build: ./services/tenant-manager
+    ports:
+      - "18082:8082"
+    depends_on: [postgres]
+    deploy:
+      replicas: 1
+
+  stream-coordinator:
+    build: ./services/stream-coordinator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP:-kafka:9092}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      TENANT_IDS: ${TENANT_IDS:-tenant-fraud,tenant-clickstream,tenant-ml,tenant-iot}
+      INPUT_TOPIC_TEMPLATE: tenant.{tenant_id}.input
+      OUTPUT_TOPIC_TEMPLATE: tenant.{tenant_id}.output
+      ALLOC_TOPIC: streamBazaar.allocations
+      PREEMPT_TOPIC: streamBazaar.preemptions
+      METRICS_TOPIC: streamBazaar.metrics
+      DEFAULT_SLA_TARGET_MS: ${DEFAULT_SLA_TARGET_MS:-200}
+      CLEAR_INTERVAL_SEC: ${CLEAR_INTERVAL_SEC:-1.0}
+      THROUGHPUT_PEAK_MSG_PER_SEC: ${THROUGHPUT_PEAK_MSG_PER_SEC:-1000}
+      NETWORK_CAPACITY_MBPS: ${NETWORK_CAPACITY_MBPS:-50}
+      SCHEDULER_MODE: ${SCHEDULER_MODE:-streambazaar}
+      PRICING_URL: http://pricing-engine:8081/price
+      BID_URL: http://auction-orchestrator:8080/bid
+      CLEAR_URL: http://auction-orchestrator:8080/auction/clear
+      ALLOCATE_URL: http://resource-allocator:8083/allocate
+      MIGRATE_URL: http://migration-coordinator:8084/migrate
+    depends_on: [kafka, redis, auction-orchestrator, pricing-engine, resource-allocator, migration-coordinator]
+    deploy:
+      replicas: ${NODE_COUNT:-1}
+
+volumes:
+  redis_data:
+  postgres_data:
+  grafana_data:
