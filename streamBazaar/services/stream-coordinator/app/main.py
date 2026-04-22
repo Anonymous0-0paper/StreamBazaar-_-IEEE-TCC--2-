@@ -532,6 +532,8 @@ class StreamCoordinator:
         ECONOMIC_EFFICIENCY_INDEX.set(eei)
 
         # FPP = weighted Jain fairness * normalized throughput.
+        # Throughput is measured as completed output rate to avoid double-counting
+        # the same message on ingress and egress.
         weighted_utils = []
         total_throughput = 0.0
         total_in_rate = 0.0
@@ -539,7 +541,7 @@ class StreamCoordinator:
         for tenant in self.tenants:
             in_delta = self.msg_in[tenant] - self.prev_msg_in[tenant]
             out_delta = self.msg_out[tenant] - self.prev_msg_out[tenant]
-            throughput = (in_delta + out_delta) / max(cycle_duration_sec, 1e-6)
+            throughput = out_delta / max(cycle_duration_sec, 1e-6)
             total_throughput += throughput
             in_rate = in_delta / max(cycle_duration_sec, 1e-6)
             out_rate = out_delta / max(cycle_duration_sec, 1e-6)
