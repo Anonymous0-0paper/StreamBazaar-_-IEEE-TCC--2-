@@ -37,7 +37,9 @@ class BaseWorkloadGenerator:
             transformed["operator_count"] = self.metadata.operator_count
             transformed["operators"] = self.metadata.operators
             transformed["state_sizes_gb"] = self.metadata.state_sizes_gb
-            transformed["timestamp"] = transformed.get("timestamp", time.time())
+            ingest_ts_ns = int(transformed.get("ingest_ts_ns", time.time_ns()))
+            transformed["ingest_ts_ns"] = ingest_ts_ns
+            transformed["timestamp"] = transformed.get("timestamp", ingest_ts_ns / 1_000_000_000.0)
             transformed["event_time"] = transformed.get("event_time", transformed["timestamp"])
             yield transformed
 

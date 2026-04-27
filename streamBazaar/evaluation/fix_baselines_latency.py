@@ -46,15 +46,16 @@ def load_kpis_fixed(csv_path: Path) -> Dict[str, float]:
     for metric, keys in latency_keys.items():
         vals = []
         for key in keys:
-            # FIX: Latency values are in nanoseconds but column names say "_ms"
-            # Convert from nanoseconds to milliseconds by dividing by 1,000,000
-            ns_vals = series(key)
-            vals.extend([v / 1_000_000 for v in ns_vals])
+            vals.extend(series(key))
         latency_values[metric] = _mean_nonzero(vals)
+
+    throughput_out = series("system_throughput_out_msgs_per_sec")
+    if not any(abs(v) > 1e-12 for v in throughput_out):
+        throughput_out = series("system_throughput_msgs_per_sec")
 
     return {
         **latency_values,
-        "throughput": _mean_nonzero(series("system_throughput_msgs_per_sec")),
+        "throughput": _mean_nonzero(throughput_out),
         "rue": _mean_nonzero(series("rue_cluster")),
         "eei": _mean_nonzero(series("eei")),
         "fpp": _mean_nonzero(series("fpp")),

@@ -16,6 +16,13 @@ BASE_QUERIES: Dict[str, str] = {
     "fpp": "streambazaar_fairness_performance_product",
     "mis": "streambazaar_migration_impact_score",
     "system_throughput_msgs_per_sec": "streambazaar_system_throughput_msgs_per_sec",
+    "system_throughput_in_msgs_per_sec": "streambazaar_system_throughput_in_msgs_per_sec",
+    "system_throughput_out_msgs_per_sec": "streambazaar_system_throughput_out_msgs_per_sec",
+    "system_goodput_msgs_per_sec": "streambazaar_system_goodput_msgs_per_sec",
+    "system_drain_ratio": "streambazaar_system_drain_ratio",
+    "system_backlog": "streambazaar_system_backlog",
+    "system_backlog_slope_per_sec": "streambazaar_system_backlog_slope_per_sec",
+    "consumed_rate_total_msgs_per_sec": "sum(rate(streambazaar_stream_events_consumed_total[30s]))",
     "msg_in_rate_total": "sum(rate(streambazaar_messages_in_total[1m]))",
     "msg_out_rate_total": "sum(rate(streambazaar_messages_out_total[1m]))",
     "bytes_in_rate_total": "sum(rate(streambazaar_message_bytes_in_total[1m]))",
@@ -34,6 +41,13 @@ def build_tenant_queries(tenants: List[str]) -> Dict[str, str]:
         out[f"throughput_{safe}_in"] = f'streambazaar_throughput_msgs_per_sec{{tenant_id="{tenant}",direction="in"}}'
         out[f"throughput_{safe}_out"] = f'streambazaar_throughput_msgs_per_sec{{tenant_id="{tenant}",direction="out"}}'
         out[f"throughput_{safe}_total"] = f'streambazaar_throughput_msgs_per_sec{{tenant_id="{tenant}",direction="total"}}'
+        out[f"consumed_rate_{safe}_msgs_per_sec"] = f'rate(streambazaar_stream_events_consumed_total{{topic="tenant.{tenant}.input"}}[30s])'
+        out[f"consumed_total_{safe}"] = f'streambazaar_stream_events_consumed_total{{topic="tenant.{tenant}.input"}}'
+        # Use the Gauge metrics published directly by the coordinator rather than
+        # histogram_quantile.  The histogram approach caps at the top bucket (5000 ms)
+        # and returns NaN when no observations exist, neither of which is useful.
+        # The Gauges are updated from the same latency_samples_ms deque and reflect
+        # the true rolling percentile without any bucket-resolution distortion.
         out[f"latency_{safe}_p50_ms"] = f'streambazaar_latency_p50_ms{{tenant_id="{tenant}"}}'
         out[f"latency_{safe}_p90_ms"] = f'streambazaar_latency_p90_ms{{tenant_id="{tenant}"}}'
         out[f"latency_{safe}_p95_ms"] = f'streambazaar_latency_p95_ms{{tenant_id="{tenant}"}}'

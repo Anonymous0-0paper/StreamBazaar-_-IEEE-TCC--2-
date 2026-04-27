@@ -13,7 +13,7 @@ from typing import Dict, List
 
 
 MODES = ["streambazaar", "talos", "ds2", "capsys", "flink_default"]
-LOWER_IS_BETTER = {"tlvr", "mis", "latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999"}
+LOWER_IS_BETTER = {"tlvr", "mis", "latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999", "backlog_slope_per_sec"}
 
 
 def run(cmd: List[str], cwd: Path, env: Dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -52,15 +52,56 @@ def _mean_nonzero(values: List[float]) -> float:
     return sum(nz) / len(nz)
 
 
-def load_kpis(csv_path: Path) -> Dict[str, float]:
+def _percentile(values: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    if len(s) == 1:
+        return float(s[0])
+    pos = (q / 100.0) * (len(s) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(s) - 1)
+    frac = pos - lo
+    return float(s[lo] * (1.0 - frac) + s[hi] * frac)
+
+
+def load_kpis(csv_path: Path, warmup_sec: int = 15) -> Dict[str, float]:
     with csv_path.open("r", encoding="utf-8") as fp:
         rows = list(csv.DictReader(fp))
     if not rows:
-        return {k: 0.0 for k in ["latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999", "throughput", "rue", "eei", "fpp", "mis", "tlvr"]}
+        return {
+            k: 0.0
+            for k in [
+                "latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999",
+                "throughput", "throughput_out_avg_msgs_per_sec", "throughput_out_p50_msgs_per_sec", "throughput_out_p95_msgs_per_sec",
+                "throughput_in_avg_msgs_per_sec", "goodput_avg_msgs_per_sec", "drain_ratio", "backlog_slope_per_sec",
+                "rue", "eei", "fpp", "mis", "tlvr",
+            ]
+        }
+
+    # Use a fixed steady-state window by excluding warmup seconds from KPI aggregation.
+    first_ts = 0
+    try:
+        first_ts = int(float(rows[0].get("timestamp_epoch", "0") or 0))
+    except Exception:
+        first_ts = 0
+    steady_rows = rows
+    if first_ts > 0 and warmup_sec > 0:
+        cutoff = first_ts + warmup_sec
+        filtered = []
+        for r in rows:
+            try:
+                ts = int(float(r.get("timestamp_epoch", "0") or 0))
+                if ts >= cutoff:
+                    filtered.append(r)
+            except Exception:
+                continue
+        if filtered:
+            steady_rows = filtered
 
     def series(name: str) -> List[float]:
         out = []
-        for r in rows:
+        for r in steady_rows:
             try:
                 out.append(float(r.get(name, "0") or 0.0))
             except Exception:
@@ -69,26 +110,44 @@ def load_kpis(csv_path: Path) -> Dict[str, float]:
 
     # Use per-tenant latency columns and average non-zero values across tenants.
     latency_keys = {
-        "latency_p50": [k for k in rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p50_ms")],
-        "latency_p90": [k for k in rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p90_ms")],
-        "latency_p95": [k for k in rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p95_ms")],
-        "latency_p99": [k for k in rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p99_ms")],
-        "latency_p999": [k for k in rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p999_ms")],
+        "latency_p50": [k for k in steady_rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p50_ms")],
+        "latency_p90": [k for k in steady_rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p90_ms")],
+        "latency_p95": [k for k in steady_rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p95_ms")],
+        "latency_p99": [k for k in steady_rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p99_ms")],
+        "latency_p999": [k for k in steady_rows[0].keys() if k.startswith("latency_tenant_") and k.endswith("_p999_ms")],
     }
 
     latency_values: Dict[str, float] = {}
     for metric, keys in latency_keys.items():
         vals = []
         for key in keys:
-            # Latency values are in nanoseconds but column names say "_ms"
-            # Convert from nanoseconds to milliseconds by dividing by 1,000,000
-            ns_vals = series(key)
-            vals.extend([v / 1_000_000 for v in ns_vals])
+            vals.extend(series(key))
         latency_values[metric] = _mean_nonzero(vals)
+
+    out_series = series("system_throughput_out_msgs_per_sec")
+    if not any(abs(v) > 1e-12 for v in out_series):
+        out_series = series("system_throughput_msgs_per_sec")
+    in_series = series("system_throughput_in_msgs_per_sec")
+    if not any(abs(v) > 1e-12 for v in in_series):
+        in_series = series("msg_in_rate_total")
+    goodput_series = series("system_goodput_msgs_per_sec")
+    if not any(abs(v) > 1e-12 for v in goodput_series):
+        goodput_series = out_series
+
+    out_avg = _mean_nonzero(out_series)
+    in_avg = _mean_nonzero(in_series)
+    goodput_avg = _mean_nonzero(goodput_series)
 
     return {
         **latency_values,
-        "throughput": _mean_nonzero(series("system_throughput_msgs_per_sec")),
+        "throughput": out_avg,
+        "throughput_out_avg_msgs_per_sec": out_avg,
+        "throughput_out_p50_msgs_per_sec": _percentile(out_series, 50.0),
+        "throughput_out_p95_msgs_per_sec": _percentile(out_series, 95.0),
+        "throughput_in_avg_msgs_per_sec": in_avg,
+        "goodput_avg_msgs_per_sec": goodput_avg,
+        "drain_ratio": out_avg / max(in_avg, 1e-6),
+        "backlog_slope_per_sec": _mean_nonzero(series("system_backlog_slope_per_sec")),
         "rue": _mean_nonzero(series("rue_cluster")),
         "eei": _mean_nonzero(series("eei")),
         "fpp": _mean_nonzero(series("fpp")),
@@ -112,6 +171,7 @@ def main() -> None:
     parser.add_argument("--records-per-tenant", type=int, default=50000)
     parser.add_argument("--dataset", default="iot-sensors")
     parser.add_argument("--tenant-id", default="tenant-iot")
+    parser.add_argument("--warmup-sec", type=int, default=15)
     parser.add_argument("--out-dir", default="evaluation/results/true_baseline_runs")
     args = parser.parse_args()
 
@@ -161,7 +221,7 @@ def main() -> None:
 
         csv_path = latest_csv(run_dir / "csv" / mode)
         mode_csv[mode] = str(csv_path)
-        mode_results[mode] = load_kpis(csv_path)
+        mode_results[mode] = load_kpis(csv_path, warmup_sec=args.warmup_sec)
 
         (run_dir / f"{mode}_kpis.json").write_text(json.dumps(mode_results[mode], indent=2), encoding="utf-8")
 
@@ -171,12 +231,17 @@ def main() -> None:
         "True Measured StreamBazaar vs Baselines Report",
         f"Generated: {datetime.now().isoformat()}",
         "",
-        "KPIs: latency p50-p999, throughput, RUE, EEI, FPP, MIS, TLVR",
+        "KPIs: latency p50-p999, throughput_out(avg/p50/p95), throughput_in_avg, goodput_avg, drain_ratio, backlog_slope, RUE, EEI, FPP, MIS, TLVR",
         "Rules: lower-is-better for latency/TLVR/MIS; higher-is-better for throughput/RUE/EEI/FPP",
         "",
     ]
 
-    metrics = ["latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999", "throughput", "rue", "eei", "fpp", "mis", "tlvr"]
+    metrics = [
+        "latency_p50", "latency_p90", "latency_p95", "latency_p99", "latency_p999",
+        "throughput_out_avg_msgs_per_sec", "throughput_out_p50_msgs_per_sec", "throughput_out_p95_msgs_per_sec",
+        "throughput_in_avg_msgs_per_sec", "goodput_avg_msgs_per_sec", "drain_ratio", "backlog_slope_per_sec",
+        "rue", "eei", "fpp", "mis", "tlvr",
+    ]
 
     for b in baselines:
         lines.append(f"=== StreamBazaar vs {b} (true measured) ===")

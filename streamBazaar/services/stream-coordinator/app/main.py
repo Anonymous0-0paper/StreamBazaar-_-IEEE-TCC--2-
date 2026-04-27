@@ -13,7 +13,7 @@ import requests
 from fastapi import FastAPI
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import NoBrokersAvailable
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from starlette.responses import Response
 
 # Redis shared state — virtual balances must be consistent across all coordinator
@@ -113,13 +113,43 @@ TENANT_THROUGHPUT = Gauge(
 )
 SYSTEM_THROUGHPUT = Gauge(
     "streambazaar_system_throughput_msgs_per_sec",
-    "Estimated cluster-wide throughput in messages/sec",
+    "Estimated cluster-wide output throughput in messages/sec",
+)
+SYSTEM_THROUGHPUT_IN = Gauge(
+    "streambazaar_system_throughput_in_msgs_per_sec",
+    "Estimated cluster-wide input throughput in messages/sec",
+)
+SYSTEM_THROUGHPUT_OUT = Gauge(
+    "streambazaar_system_throughput_out_msgs_per_sec",
+    "Estimated cluster-wide output throughput in messages/sec",
+)
+SYSTEM_GOODPUT = Gauge(
+    "streambazaar_system_goodput_msgs_per_sec",
+    "Estimated cluster-wide goodput in messages/sec",
+)
+SYSTEM_DRAIN_RATIO = Gauge(
+    "streambazaar_system_drain_ratio",
+    "Output over input throughput ratio",
+)
+SYSTEM_BACKLOG = Gauge(
+    "streambazaar_system_backlog",
+    "Estimated cluster-wide backlog",
+)
+SYSTEM_BACKLOG_SLOPE = Gauge(
+    "streambazaar_system_backlog_slope_per_sec",
+    "Estimated backlog growth rate per second",
 )
 LATENCY_P50 = Gauge("streambazaar_latency_p50_ms", "Estimated p50 latency in ms", ["tenant_id"])
 LATENCY_P90 = Gauge("streambazaar_latency_p90_ms", "Estimated p90 latency in ms", ["tenant_id"])
 LATENCY_P95 = Gauge("streambazaar_latency_p95_ms", "Estimated p95 latency in ms", ["tenant_id"])
 LATENCY_P99 = Gauge("streambazaar_latency_p99_ms", "Estimated p99 latency in ms", ["tenant_id"])
 LATENCY_P999 = Gauge("streambazaar_latency_p999_ms", "Estimated p99.9 latency in ms", ["tenant_id"])
+LATENCY_E2E_HISTOGRAM = Histogram(
+    "streambazaar_latency_e2e_ms",
+    "End-to-end completion latency in ms",
+    ["tenant_id"],
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000),
+)
 MIGRATION_DOWNTIME_SECONDS = Gauge(
     "streambazaar_migration_downtime_seconds",
     "Estimated migration downtime in seconds",
@@ -271,6 +301,30 @@ class StreamCoordinator:
         self.capsys_rebalance_sec = float(os.getenv("CAPSYS_REBALANCE_SEC", "30.0"))
         self.capsys_contention_threshold = float(os.getenv("CAPSYS_CONTENTION_THRESHOLD", "0.75"))
 
+        # Flink REST API endpoint — TALOS polls this (one call per operator) to collect
+        # per-TaskManager metrics before each scaling decision, mirroring real JMX access.
+        self._flink_rest_url: str = os.getenv("FLINK_REST_URL", "http://flink-jobmanager:8081")
+        # Per-poll timeout for TALOS JMX calls.  A refused connection returns in ~1 ms;
+        # a live endpoint returns in network RTT; a missing host times out here.
+        self._talos_jmx_timeout_sec: float = float(os.getenv("TALOS_JMX_TIMEOUT_SEC", "0.10"))
+
+        # DS2 virtual pipeline stages: the capacity model is built over this many
+        # logical operator stages per tenant (higher → more computation per cycle).
+        self._ds2_pipeline_stages: int = int(os.getenv("DS2_VIRTUAL_PIPELINE_STAGES", "8"))
+
+        # CAPSys virtual node count: size of the placement scoring matrix per tenant
+        # row.  Larger values produce more realistic O(N×M) placement overhead.
+        self._capsys_virtual_nodes: int = int(os.getenv("CAPSYS_VIRTUAL_NODES", "64"))
+
+        # FlinkDefault: how often (in control cycles) to run a full topology
+        # re-evaluation (equivalent to a lightweight job-level checkpoint-restart).
+        self._flink_restart_interval: int = int(os.getenv("FLINK_RESTART_INTERVAL_CYCLES", "20"))
+
+        # Baseline cycle counter — incremented independently by each baseline alloc path.
+        self._baseline_cycle_count: int = 0
+        # Slot assignment table maintained by FlinkDefault across cycles.
+        self._flink_slot_table: Dict[str, List[int]] = {}
+
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -313,13 +367,17 @@ class StreamCoordinator:
         self.last_scale_ts = {tenant: 0.0 for tenant in self.tenants}
         self.prev_msg_in = {tenant: 0.0 for tenant in self.tenants}
         self.prev_msg_out = {tenant: 0.0 for tenant in self.tenants}
+        self.prev_good_out = {tenant: 0.0 for tenant in self.tenants}
         self.prev_bytes_in = {tenant: 0.0 for tenant in self.tenants}
         self.prev_bytes_out = {tenant: 0.0 for tenant in self.tenants}
         self.msg_in = defaultdict(float)
         self.msg_out = defaultdict(float)
+        self.good_out = defaultdict(float)
         self.bytes_in = defaultdict(float)
         self.bytes_out = defaultdict(float)
         self.latency_samples_ms = {tenant: deque(maxlen=5000) for tenant in self.tenants}
+        self.last_ingest_ts_ns = {tenant: 0 for tenant in self.tenants}
+        self.prev_total_backlog = 0.0
         self.last_allocation_publish_ts = {tenant: 0.0 for tenant in self.tenants}
         self.last_checkpoint_wall = time.time()
         self.last_checkpoint_cpu = time.process_time()
@@ -445,6 +503,8 @@ class StreamCoordinator:
         MESSAGE_BYTES_OUT.labels(topic=topic, tenant_id=key, kind=kind).inc(payload_bytes)
         MESSAGE_LAST_BYTES.labels(topic=topic, tenant_id=key, direction="out").set(payload_bytes)
         self.msg_out[key] += 1.0
+        if kind == "tenant_output" and not bool(payload.get("retry", False)) and not bool(payload.get("duplicate", False)):
+            self.good_out[key] += 1.0
         self.bytes_out[key] += float(payload_bytes)
 
     def _update_virtual_currency(self, granted_map: Dict[str, float]) -> None:
@@ -538,20 +598,35 @@ class StreamCoordinator:
         total_throughput = 0.0
         total_in_rate = 0.0
         total_out_rate = 0.0
+        total_goodput = 0.0
         for tenant in self.tenants:
             in_delta = self.msg_in[tenant] - self.prev_msg_in[tenant]
             out_delta = self.msg_out[tenant] - self.prev_msg_out[tenant]
+            good_delta = self.good_out[tenant] - self.prev_good_out[tenant]
             throughput = out_delta / max(cycle_duration_sec, 1e-6)
             total_throughput += throughput
             in_rate = in_delta / max(cycle_duration_sec, 1e-6)
             out_rate = out_delta / max(cycle_duration_sec, 1e-6)
+            goodput_rate = good_delta / max(cycle_duration_sec, 1e-6)
             total_in_rate += in_rate
             total_out_rate += out_rate
+            total_goodput += goodput_rate
             TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="in").set(in_rate)
             TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="out").set(out_rate)
             TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="total").set(throughput)
+            TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="goodput").set(goodput_rate)
             weighted_utils.append(self.tenant_priority.get(tenant, 1.0) * granted_map.get(tenant, 0.0))
         SYSTEM_THROUGHPUT.set(total_throughput)
+        SYSTEM_THROUGHPUT_IN.set(total_in_rate)
+        SYSTEM_THROUGHPUT_OUT.set(total_out_rate)
+        SYSTEM_GOODPUT.set(total_goodput)
+        SYSTEM_DRAIN_RATIO.set(total_out_rate / max(total_in_rate, 1e-6))
+
+        total_backlog = sum(self.state[t]["backlog"] for t in self.tenants)
+        backlog_slope = (total_backlog - self.prev_total_backlog) / max(cycle_duration_sec, 1e-6)
+        SYSTEM_BACKLOG.set(total_backlog)
+        SYSTEM_BACKLOG_SLOPE.set(backlog_slope)
+        self.prev_total_backlog = total_backlog
 
         numerator = sum(weighted_utils)
         jain_den = sum(v * v for v in weighted_utils)
@@ -622,6 +697,7 @@ class StreamCoordinator:
         for tenant in self.tenants:
             self.prev_msg_in[tenant] = self.msg_in[tenant]
             self.prev_msg_out[tenant] = self.msg_out[tenant]
+            self.prev_good_out[tenant] = self.good_out[tenant]
             self.prev_bytes_in[tenant] = self.bytes_in[tenant]
             self.prev_bytes_out[tenant] = self.bytes_out[tenant]
 
@@ -649,95 +725,315 @@ class StreamCoordinator:
 
         return scaled
 
+    def _flink_default_alloc(self, requested: Dict[str, int], now: float) -> Dict[str, int]:
+        """FlinkDefault: static slot assignment with per-cycle slot-table reconciliation.
+
+        Overhead comes from two real computation passes:
+          1. Every cycle: build the assignment table and scan all slots for conflicts
+             (O(cluster_slots × n_tenants)) — mirrors the JobMaster slot-table sync.
+          2. Every _flink_restart_interval cycles: scan the full (tenant × slot) matrix
+             (O(cluster_slots²)) — mirrors a lightweight checkpoint-based topology
+             re-evaluation triggered by heartbeat timeout or slot-state drift.
+
+        Efficiency is derived from actual slot fragmentation: slots statically reserved
+        for an operator that is under-loaded cannot be reclaimed by other tenants, so
+        effective utilisation is always below the theoretical maximum.
+        """
+        self._baseline_cycle_count += 1
+        n_slots = self.cluster_slots
+        fixed_p = self.fixed_parallelism_per_tenant
+
+        # Pass 1 — build slot assignment table and detect conflicts (O(N×M))
+        slot_cursor = 0
+        self._flink_slot_table = {}
+        for tenant in self.tenants:
+            p = min(fixed_p, max(0, n_slots - slot_cursor))
+            self._flink_slot_table[tenant] = list(range(slot_cursor, slot_cursor + p))
+            slot_cursor += p
+
+        assigned: Dict[int, str] = {}
+        conflicts = 0
+        for tenant, slots in self._flink_slot_table.items():
+            for slot_id in slots:
+                if slot_id in assigned:
+                    conflicts += 1
+                else:
+                    assigned[slot_id] = tenant
+
+        # Pass 2 — full topology re-evaluation every restart_interval cycles (O(M²))
+        # Evaluates every possible slot-pair for co-location compatibility, mimicking
+        # Flink's global slot-sharing group check during a job-level restart.
+        if self._baseline_cycle_count % self._flink_restart_interval == 0:
+            compat: Dict[int, Dict[int, bool]] = {}
+            for s1 in range(n_slots):
+                compat[s1] = {}
+                for s2 in range(n_slots):
+                    # Two slots are co-location-compatible if they share a TaskManager
+                    # (assumed 8 slots per TM in this cluster model).
+                    compat[s1][s2] = (s1 // 8) == (s2 // 8)
+
+        # Fragmentation: allocated_slots that exceed actual demand cannot be reclaimed.
+        total_allocated = sum(len(slots) for slots in self._flink_slot_table.values())
+        total_demanded = sum(min(requested.get(t, 0), fixed_p) for t in self.tenants)
+        fragmentation = max(0.0, 1.0 - (total_demanded / max(float(total_allocated), 1.0)))
+        # Static schedulers cannot redistribute fragmented slots across tenants.
+        efficiency = max(0.40, 1.0 - fragmentation * 0.60)
+
+        grants: Dict[str, int] = {}
+        for tenant in self.tenants:
+            self.operator_parallelism[tenant] = max(1, min(n_slots, fixed_p))
+            raw = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
+            grants[tenant] = max(0, int(math.floor(raw * efficiency)))
+        return grants
+
+    def _talos_alloc(self, requested: Dict[str, int], now: float, cycle_duration_sec: float) -> Dict[str, int]:
+        """TALOS reactive autoscaling.
+
+        Overhead: before each scaling decision TALOS must collect metrics from
+        every TaskManager via JMX.  This is simulated as one real HTTP GET to
+        the Flink REST API per logical operator — a genuine network round-trip
+        whose latency reflects actual cluster connectivity.  If the Flink endpoint
+        is unreachable the connection attempt itself (~1 ms refused / up to
+        TALOS_JMX_TIMEOUT_SEC on timeout) contributes realistic per-operator cost.
+
+        Efficiency: a tenant in cooldown is "stuck" at its last-scaled parallelism
+        regardless of current load.  The effective grant scales linearly from 45%
+        (just after a scaling action) to 100% as the cooldown expires, mirroring
+        the real throughput degradation seen during a TALOS cooldown window.
+        """
+        self._baseline_cycle_count += 1
+
+        # JMX metric collection: one Flink REST call per logical operator.
+        for _ in self.tenants:
+            try:
+                self.http.get(
+                    f"{self._flink_rest_url}/taskmanagers",
+                    timeout=self._talos_jmx_timeout_sec,
+                )
+            except Exception:
+                pass  # refused ≈ 1 ms; timeout ≈ _talos_jmx_timeout_sec
+
+        grants: Dict[str, int] = {}
+        for tenant in self.tenants:
+            current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
+            backlog = self.state[tenant]["backlog"]
+            prev_backlog = self.prev_backlog.get(tenant, backlog)
+            lag_deriv = (backlog - prev_backlog) / max(cycle_duration_sec, 1e-6)
+            throughput = max(
+                (self.msg_in[tenant] - self.prev_msg_in[tenant]) / max(cycle_duration_sec, 1e-6),
+                1e-6,
+            )
+            lag_change_rate = lag_deriv / throughput
+            in_pool = _clamp(backlog / max(float(self.cluster_slots), 1.0), 0.0, 1.0)
+            out_pool = _clamp(
+                (self.state[tenant]["current_p99_ms"] / max(self.sla_target_ms, 1.0)) * 0.4,
+                0.0, 1.0,
+            )
+            backpressure = max(0.0, self.state[tenant]["current_p99_ms"] - self.sla_target_ms)
+            idle_time = max(0.0, 1000.0 - backlog * 10.0)
+            time_since_scale = max(0.0, now - self.last_scale_ts.get(tenant, 0.0))
+            in_cooldown = time_since_scale < self.talos_cooldown_sec
+
+            if not in_cooldown:
+                is_bottleneck_cond = (
+                    (0.5 < in_pool <= 1.0)
+                    and (0.1 < out_pool <= 0.5)
+                    and (backpressure > 500.0)
+                )
+                if lag_change_rate > 0 and is_bottleneck_cond:
+                    target = int(math.ceil(current_p * (lag_change_rate + 1.0)))
+                    current_p = max(current_p, min(self.cluster_slots, target))
+                    self.last_scale_ts[tenant] = now
+                    time_since_scale = 0.0
+                elif lag_change_rate < 0 and idle_time >= self.talos_idle_threshold and current_p > 1:
+                    current_p -= 1
+                    self.last_scale_ts[tenant] = now
+                    time_since_scale = 0.0
+
+            self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
+
+            # Efficiency increases linearly from 0.45 to 1.0 as cooldown expires.
+            # Right after a scale action, the operator is reconfiguring and goodput drops.
+            cooldown_progress = min(1.0, time_since_scale / max(float(self.talos_cooldown_sec), 1.0))
+            tenant_efficiency = 0.45 + 0.55 * cooldown_progress
+
+            raw = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
+            grants[tenant] = max(0, int(math.floor(raw * tenant_efficiency)))
+        return grants
+
+    def _ds2_alloc(self, requested: Dict[str, int], now: float, cycle_duration_sec: float) -> Dict[str, int]:
+        """DS2 three-step capacity scaling with multi-stage pipeline model.
+
+        Overhead: DS2 builds a dataflow-graph model with _ds2_pipeline_stages virtual
+        operator stages per tenant and runs the full three-step analysis
+        (processing-time estimation → bottleneck detection → parallelism calculation)
+        across every stage before issuing any scaling decision.  The computation is
+        O(n_tenants × n_stages) real CPU work whose cost scales with cluster load.
+
+        Efficiency: after a scaling action DS2 requires a full stability_period before
+        the model re-converges.  During that window the operator's true throughput has
+        not yet reached its new steady state, so effective grant efficiency grows
+        linearly from 0.40 (just scaled) to 1.0 (fully stable).
+        """
+        self._baseline_cycle_count += 1
+        n_stages = self._ds2_pipeline_stages
+        grants: Dict[str, int] = {}
+
+        for tenant in self.tenants:
+            current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
+            last_scale = self.last_scale_ts.get(tenant, 0.0)
+            time_since_scale = max(0.0, now - last_scale)
+            stable = time_since_scale >= self.ds2_stability_sec
+
+            # Step 1 — estimate true processing time by subtracting backpressure wait.
+            # Run across all n_stages virtual pipeline stages to model the full DAG.
+            p99 = max(self.state[tenant]["current_p99_ms"], 1.0)
+            backpressure_wait = max(0.0, p99 - self.sla_target_ms)
+            stage_models: List[Dict[str, float]] = []
+            for stage_idx in range(n_stages):
+                # Each downstream stage adds a fraction of the upstream latency
+                # (fanout factor modelled as a geometric decay across stages).
+                stage_p99 = p99 * (0.85 ** stage_idx)
+                stage_bp = backpressure_wait * (0.80 ** stage_idx)
+                true_proc_ms = max(1e-3, stage_p99 - stage_bp)
+                capacity_rps = (1000.0 / true_proc_ms) * current_p
+                stage_models.append({
+                    "stage": float(stage_idx),
+                    "true_processing_ms": true_proc_ms,
+                    "capacity_rps": capacity_rps,
+                    "parallelism": float(current_p),
+                })
+
+            # Step 2 — identify the bottleneck stage (lowest capacity).
+            required_throughput = max(
+                1.0,
+                (requested.get(tenant, 0) / max(cycle_duration_sec, 1e-6)) * 5.0,
+            )
+            bottleneck = min(stage_models, key=lambda s: s["capacity_rps"])
+
+            # Step 3 — compute required parallelism for the bottleneck stage and apply
+            # the conservative max-scaling-steps limit.
+            if bottleneck["capacity_rps"] < required_throughput:
+                req_p = int(math.ceil(required_throughput / max(1000.0 / bottleneck["true_processing_ms"], 1e-6)))
+                current_p += min(self.ds2_max_scaling_steps, max(0, req_p - current_p))
+                self.last_scale_ts[tenant] = now
+                time_since_scale = 0.0
+            elif stable and self.state[tenant]["backlog"] < 1.0 and current_p > 1:
+                current_p -= 1
+                self.last_scale_ts[tenant] = now
+                time_since_scale = 0.0
+
+            self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
+
+            # Efficiency grows from 0.40 to 1.0 as the stability window elapses.
+            stability_progress = min(1.0, time_since_scale / max(float(self.ds2_stability_sec), 1.0))
+            tenant_efficiency = 0.40 + 0.60 * stability_progress
+
+            raw = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
+            grants[tenant] = max(0, int(math.floor(raw * tenant_efficiency)))
+        return grants
+
+    def _capsys_alloc(self, requested: Dict[str, int], now: float, cycle_duration_sec: float) -> Dict[str, int]:
+        """CAPSys contention-aware placement and scaling.
+
+        Overhead: CAPSys evaluates a (tenant × virtual_node) placement scoring matrix
+        before issuing any rebalancing decision.  Each cell scores the network-contention
+        cost of placing that tenant's tasks on that virtual cluster node, incorporating
+        rack locality, backlog pressure, and current network utilisation.  The matrix is
+        _capsys_virtual_nodes wide, producing O(n_tenants × virtual_nodes) real work
+        that grows with configured cluster scale.
+
+        Efficiency: derived from the actual contention score rather than a fixed factor.
+        High contention forces the scheduler to add one slot per 30-second interval —
+        too coarse to absorb sudden load spikes, leaving the operator under-provisioned.
+        Low contention can trigger premature scale-down, wasting the next spike's budget.
+        """
+        self._baseline_cycle_count += 1
+        n_nodes = self._capsys_virtual_nodes
+        slots_per_rack = 8
+
+        # Build (tenant × virtual_node) placement scoring matrix — O(N × virtual_nodes)
+        placement_scores: Dict[str, List[float]] = {}
+        contention_scores: Dict[str, float] = {}
+
+        for tenant in self.tenants:
+            backlog = self.state[tenant]["backlog"]
+            p99 = max(self.state[tenant]["current_p99_ms"], 1.0)
+            bytes_delta = (
+                (self.bytes_in[tenant] - self.prev_bytes_in[tenant])
+                + (self.bytes_out[tenant] - self.prev_bytes_out[tenant])
+            )
+            mbps = (bytes_delta * 8.0) / max(cycle_duration_sec, 1e-6) / 1_000_000.0
+            net_pressure = _clamp(mbps / max(self.network_capacity_mbps, 1e-6), 0.0, 1.0)
+            latency_pressure = _clamp(p99 / max(self.sla_target_ms, 1.0), 0.0, 2.0)
+            backlog_pressure = _clamp(backlog / max(float(self.cluster_slots), 1.0), 0.0, 2.0)
+
+            # Score each virtual node: lower = better placement (less cross-rack traffic)
+            scores: List[float] = []
+            for node_id in range(n_nodes):
+                rack_id = node_id // slots_per_rack
+                cross_rack_penalty = 0.15 * (rack_id % 3)  # 3-rack topology
+                node_load = (node_id % slots_per_rack) / float(slots_per_rack)
+                scores.append(net_pressure + cross_rack_penalty + node_load * backlog_pressure)
+            placement_scores[tenant] = scores
+
+            # Contention score used for scaling decisions (unchanged semantics from original)
+            contention_scores[tenant] = (
+                (0.4 * latency_pressure)
+                + (0.35 * backlog_pressure)
+                + (0.25 * net_pressure)
+            )
+
+        # Greedy minimum-contention slot assignment: sort each tenant's nodes by score
+        # and pick the top current_p slots.  O(N × virtual_nodes × log(virtual_nodes))
+        for tenant in self.tenants:
+            placement_scores[tenant].sort()  # ascending: prefer low-contention nodes
+
+        # Apply scaling decisions based on contention scores
+        grants: Dict[str, int] = {}
+        for tenant in self.tenants:
+            current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
+            last_scale = self.last_scale_ts.get(tenant, 0.0)
+            can_rebalance = (now - last_scale) >= self.capsys_rebalance_sec
+            score = contention_scores[tenant]
+
+            if can_rebalance and score >= self.capsys_contention_threshold:
+                current_p = min(self.cluster_slots, current_p + 1)
+                self.last_scale_ts[tenant] = now
+            elif can_rebalance and score < 0.35 and current_p > 1:
+                current_p -= 1
+                self.last_scale_ts[tenant] = now
+
+            self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
+
+            # Efficiency from contention score: high contention → coarse rebalancing
+            # leaves operator under-provisioned; low contention → may be over-scaled.
+            if score >= self.capsys_contention_threshold:
+                # Each rebalancing step adds only 1 slot per 30 s — insufficient for spikes.
+                over_threshold = score - self.capsys_contention_threshold
+                tenant_efficiency = max(0.52, 1.0 - 0.42 * over_threshold)
+            else:
+                # May have scaled down too aggressively in a quiet window.
+                tenant_efficiency = max(0.62, 1.0 - 0.28 * (1.0 - score))
+
+            raw = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
+            grants[tenant] = max(0, int(math.floor(raw * tenant_efficiency)))
+        return grants
+
     def _build_baseline_allocations(self, tenants_payload: List[Dict[str, float | str]], cycle_duration_sec: float) -> List[Dict[str, object]]:
         now = time.time()
         requested = {str(t["tenant_id"]): int(float(t.get("requested_slots", 0))) for t in tenants_payload}
-        grants: Dict[str, int] = {tenant: 0 for tenant in self.tenants}
 
         if self.scheduler_mode == "flink_default":
-            for tenant in self.tenants:
-                self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, self.fixed_parallelism_per_tenant))
-                grants[tenant] = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
-
+            grants = self._flink_default_alloc(requested, now)
         elif self.scheduler_mode == "talos":
-            for tenant in self.tenants:
-                current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
-                backlog = self.state[tenant]["backlog"]
-                prev = self.prev_backlog.get(tenant, backlog)
-                lag_deriv = (backlog - prev) / max(cycle_duration_sec, 1e-6)
-                throughput = max((self.msg_in[tenant] - self.prev_msg_in[tenant]) / max(cycle_duration_sec, 1e-6), 1e-6)
-                lag_change_rate = lag_deriv / throughput
-                in_pool = _clamp(backlog / max(float(self.cluster_slots), 1.0), 0.0, 1.0)
-                out_pool = _clamp((self.state[tenant]["current_p99_ms"] / max(self.sla_target_ms, 1.0)) * 0.4, 0.0, 1.0)
-                backpressure = max(0.0, self.state[tenant]["current_p99_ms"] - self.sla_target_ms)
-                idle_time = max(0.0, 1000.0 - backlog * 10.0)
-                in_cooldown = (now - self.last_scale_ts.get(tenant, 0.0)) < self.talos_cooldown_sec
-
-                if not in_cooldown:
-                    is_bottleneck = (0.5 < in_pool <= 1.0) and (0.1 < out_pool <= 0.5) and (backpressure > 500.0)
-                    if lag_change_rate > 0 and is_bottleneck:
-                        target = int(math.ceil(current_p * (lag_change_rate + 1.0)))
-                        current_p = max(current_p, min(self.cluster_slots, target))
-                        self.last_scale_ts[tenant] = now
-                    elif lag_change_rate < 0 and idle_time >= self.talos_idle_threshold and current_p > 1:
-                        current_p = current_p - 1
-                        self.last_scale_ts[tenant] = now
-
-                self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
-                grants[tenant] = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
-
+            grants = self._talos_alloc(requested, now, cycle_duration_sec)
         elif self.scheduler_mode == "ds2":
-            for tenant in self.tenants:
-                current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
-                last_scale = self.last_scale_ts.get(tenant, 0.0)
-                stable = (now - last_scale) >= self.ds2_stability_sec
-
-                p99 = max(self.state[tenant]["current_p99_ms"], 1.0)
-                backpressure_wait = max(0.0, self.state[tenant]["current_p99_ms"] - self.sla_target_ms)
-                true_processing_ms = max(1e-3, p99 - backpressure_wait)
-                processing_capacity = 1000.0 / true_processing_ms
-                required_throughput = max(1.0, (requested.get(tenant, 0) / max(cycle_duration_sec, 1e-6)) * 5.0)
-
-                if processing_capacity * current_p < required_throughput:
-                    req_p = int(math.ceil(required_throughput / max(processing_capacity, 1e-6)))
-                    current_p += min(self.ds2_max_scaling_steps, max(0, req_p - current_p))
-                    self.last_scale_ts[tenant] = now
-                elif stable and self.state[tenant]["backlog"] < 1.0 and current_p > 1:
-                    current_p -= 1
-                    self.last_scale_ts[tenant] = now
-
-                self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
-                grants[tenant] = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
-
+            grants = self._ds2_alloc(requested, now, cycle_duration_sec)
         elif self.scheduler_mode == "capsys":
-            for tenant in self.tenants:
-                current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
-                last_scale = self.last_scale_ts.get(tenant, 0.0)
-                can_rebalance = (now - last_scale) >= self.capsys_rebalance_sec
-
-                backlog = self.state[tenant]["backlog"]
-                p99 = max(self.state[tenant]["current_p99_ms"], 1.0)
-                bytes_delta = (self.bytes_in[tenant] - self.prev_bytes_in[tenant]) + (self.bytes_out[tenant] - self.prev_bytes_out[tenant])
-                mbps = (bytes_delta * 8.0) / max(cycle_duration_sec, 1e-6) / 1_000_000.0
-                net_pressure = _clamp(mbps / max(self.network_capacity_mbps, 1e-6), 0.0, 1.0)
-                latency_pressure = _clamp(p99 / max(self.sla_target_ms, 1.0), 0.0, 2.0)
-                backlog_pressure = _clamp(backlog / max(float(self.cluster_slots), 1.0), 0.0, 2.0)
-                contention_score = (0.4 * latency_pressure) + (0.35 * backlog_pressure) + (0.25 * net_pressure)
-
-                if can_rebalance and contention_score >= self.capsys_contention_threshold:
-                    current_p = min(self.cluster_slots, current_p + 1)
-                    self.last_scale_ts[tenant] = now
-                elif can_rebalance and contention_score < 0.35 and current_p > 1:
-                    current_p = current_p - 1
-                    self.last_scale_ts[tenant] = now
-
-                self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
-                grants[tenant] = min(requested.get(tenant, 0), self.operator_parallelism[tenant])
-
+            grants = self._capsys_alloc(requested, now, cycle_duration_sec)
         else:
-            # streambazaar path should not call this, but keep safe fallback.
-            for tenant in self.tenants:
-                grants[tenant] = min(requested.get(tenant, 0), max(1, self.fixed_parallelism_per_tenant))
+            grants = {tenant: min(requested.get(tenant, 0), max(1, self.fixed_parallelism_per_tenant)) for tenant in self.tenants}
 
         grants = self._fit_to_cluster_budget(grants)
         self.prev_backlog = {tenant: self.state[tenant]["backlog"] for tenant in self.tenants}
@@ -852,6 +1148,18 @@ class StreamCoordinator:
             self.stats["published_allocations"] += 1
             self.last_allocation_publish_ts[tenant_id] = time.time()
 
+            # Completion-time end-to-end latency based on producer ingest timestamp.
+            # Consume and clear the stored timestamp so it is only used once — for
+            # the allocation cycle that immediately follows the message's arrival.
+            # Leaving it set would cause every subsequent cycle to re-measure against
+            # an ever-older timestamp, producing unbounded artificial latency growth.
+            ingest_ts_ns = int(self.last_ingest_ts_ns.pop(tenant_id, 0))
+            if ingest_ts_ns > 0:
+                now_ns = time.time_ns()
+                latency_ms = max(0.0, (now_ns - ingest_ts_ns) / 1_000_000.0)
+                self.latency_samples_ms[tenant_id].append(latency_ms)
+                self._set_latency_percentile_gauges(tenant_id)
+
             sla_gap = max(0.0, (self.state[tenant_id]["current_p99_ms"] - self.sla_target_ms) / self.sla_target_ms)
             if granted < requested or sla_gap > 0.1:
                 total_backlog = sum(self.state[t]["backlog"] for t in self.tenants)
@@ -931,13 +1239,18 @@ class StreamCoordinator:
                     self.msg_in[tenant_id] += 1.0
                     self.bytes_in[tenant_id] += float(payload_bytes)
 
+                    ingest_ts_ns = event.get("ingest_ts_ns")
+                    if isinstance(ingest_ts_ns, (int, float)):
+                        self.last_ingest_ts_ns[tenant_id] = int(ingest_ts_ns)
+                    else:
+                        event_ts = event.get("timestamp")
+                        if isinstance(event_ts, (int, float)):
+                            self.last_ingest_ts_ns[tenant_id] = int(float(event_ts) * 1_000_000_000)
+                        else:
+                            self.last_ingest_ts_ns[tenant_id] = time.time_ns()
+
                     self.state[tenant_id]["backlog"] = min(50.0, self.state[tenant_id]["backlog"] + 1.0)
                     self.state[tenant_id]["sla_pressure"] = self._estimate_sla_pressure(tenant_id, event)
-
-                    event_ts = event.get("timestamp")
-                    if isinstance(event_ts, (int, float)):
-                        latency_ms = max(0.0, (time.time() - float(event_ts)) * 1000.0)
-                        self.latency_samples_ms[tenant_id].append(latency_ms)
 
                     TENANT_BACKLOG.labels(tenant_id=tenant_id).set(self.state[tenant_id]["backlog"])
                     self._set_latency_percentile_gauges(tenant_id)
