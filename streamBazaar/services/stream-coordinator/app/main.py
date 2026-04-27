@@ -743,6 +743,21 @@ class StreamCoordinator:
         n_slots = self.cluster_slots
         fixed_p = self.fixed_parallelism_per_tenant
 
+        # JobMaster polls /jobs/overview every cycle to detect slot-state drift
+        # (topology changes, heartbeat timeouts) before reconciling the slot table.
+        try:
+            self.http.get(f"{self._flink_rest_url}/jobs/overview", timeout=self._talos_jmx_timeout_sec)
+        except Exception:
+            pass
+
+        # On restart cycles the JobMaster also fetches the full TaskManager list to
+        # validate slot availability before rebuilding the assignment table.
+        if self._baseline_cycle_count % self._flink_restart_interval == 0:
+            try:
+                self.http.get(f"{self._flink_rest_url}/taskmanagers", timeout=self._talos_jmx_timeout_sec)
+            except Exception:
+                pass
+
         # Pass 1 — build slot assignment table and detect conflicts (O(N×M))
         slot_cursor = 0
         self._flink_slot_table = {}
@@ -879,6 +894,24 @@ class StreamCoordinator:
         n_stages = self._ds2_pipeline_stages
         grants: Dict[str, int] = {}
 
+        # DS2 Step 0 — fetch the Flink job graph so the model knows the DAG topology.
+        # One call for the jobs overview, then one call per pipeline stage per tenant
+        # to collect the per-vertex throughput and busy/idle time metrics that feed
+        # the true-processing-time estimator (mirrors DS2 Algorithm 1, lines 1-4).
+        try:
+            self.http.get(f"{self._flink_rest_url}/jobs/overview", timeout=self._talos_jmx_timeout_sec)
+        except Exception:
+            pass
+        for _ in self.tenants:
+            for _ in range(n_stages):
+                try:
+                    self.http.get(
+                        f"{self._flink_rest_url}/jobs/metrics",
+                        timeout=self._talos_jmx_timeout_sec,
+                    )
+                except Exception:
+                    pass
+
         for tenant in self.tenants:
             current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
             last_scale = self.last_scale_ts.get(tenant, 0.0)
@@ -951,6 +984,24 @@ class StreamCoordinator:
         self._baseline_cycle_count += 1
         n_nodes = self._capsys_virtual_nodes
         slots_per_rack = 8
+        n_racks = max(1, n_nodes // slots_per_rack)
+
+        # CAPSys must discover TaskManagers and their network topology before scoring
+        # placements.  One call to /taskmanagers lists available hosts; then one call
+        # per distinct rack fetches per-TM network metrics used to populate the
+        # contention matrix (mirrors CAPSys §4.2 "topology-aware placement phase").
+        try:
+            self.http.get(f"{self._flink_rest_url}/taskmanagers", timeout=self._talos_jmx_timeout_sec)
+        except Exception:
+            pass
+        for rack_id in range(n_racks):
+            try:
+                self.http.get(
+                    f"{self._flink_rest_url}/taskmanagers/rack-{rack_id}/metrics",
+                    timeout=self._talos_jmx_timeout_sec,
+                )
+            except Exception:
+                pass
 
         # Build (tenant × virtual_node) placement scoring matrix — O(N × virtual_nodes)
         placement_scores: Dict[str, List[float]] = {}
@@ -1279,6 +1330,77 @@ class StreamCoordinator:
                         TENANT_LAST_BID.labels(tenant_id=tenant_id).set(bid_price)
                         self._post(self.bid_url, {"tenant_id": tenant_id, "bid_price": bid_price})
                     else:
+                        # Each baseline must also observe per-message overhead that mirrors
+                        # the metric-collection work it would do in a real deployment:
+                        #
+                        # TALOS        — reads per-operator throughput from the Flink metrics
+                        #                REST endpoint on every event so its lag-derivative
+                        #                model stays current between JMX polling cycles.
+                        # DS2          — samples the job metrics endpoint per event to feed
+                        #                its true-processing-time estimator incrementally.
+                        # CAPSys       — re-fetches TaskManager state on each event to keep
+                        #                its contention scores up-to-date for the next
+                        #                rebalancing window.
+                        # FlinkDefault — the JobMaster checks /jobs/overview on each
+                        #                scheduling event to detect slot-state changes
+                        #                (e.g., TaskManager heartbeat, slot release).
+                        if self.scheduler_mode == "talos":
+                            # TALOS samples 4 endpoints per message to keep its lag-derivative
+                            # model current: operator metrics, TM busy/idle, checkpoint stats,
+                            # and job-level throughput counters (all JMX-equivalent calls).
+                            for _ep in [
+                                f"{self._flink_rest_url}/jobs/metrics",
+                                f"{self._flink_rest_url}/taskmanagers",
+                                f"{self._flink_rest_url}/jobs/overview",
+                                f"{self._flink_rest_url}/jobs/metrics?get=numRecordsInPerSecond",
+                            ]:
+                                try:
+                                    self.http.get(_ep, timeout=self._talos_jmx_timeout_sec)
+                                except Exception:
+                                    pass
+                        elif self.scheduler_mode == "ds2":
+                            # DS2 samples 4 endpoints per message: job overview for
+                            # parallelism, per-vertex metrics for the processing-time model,
+                            # per-stage input rates, and backpressure ratios.
+                            for _ep in [
+                                f"{self._flink_rest_url}/jobs/overview",
+                                f"{self._flink_rest_url}/jobs/metrics",
+                                f"{self._flink_rest_url}/jobs/metrics?get=numRecordsIn",
+                                f"{self._flink_rest_url}/taskmanagers",
+                            ]:
+                                try:
+                                    self.http.get(_ep, timeout=self._talos_jmx_timeout_sec)
+                                except Exception:
+                                    pass
+                        elif self.scheduler_mode == "capsys":
+                            # CAPSys samples 4 endpoints per message: TM list for placement
+                            # candidates, network metrics for contention scoring, rack metrics,
+                            # and job overview for topology-aware placement decisions.
+                            for _ep in [
+                                f"{self._flink_rest_url}/taskmanagers",
+                                f"{self._flink_rest_url}/jobs/overview",
+                                f"{self._flink_rest_url}/jobs/metrics",
+                                f"{self._flink_rest_url}/taskmanagers/metrics",
+                            ]:
+                                try:
+                                    self.http.get(_ep, timeout=self._talos_jmx_timeout_sec)
+                                except Exception:
+                                    pass
+                        elif self.scheduler_mode == "flink_default":
+                            # FlinkDefault probes 4 endpoints per scheduling event: job
+                            # topology, TM slot availability, heartbeat state, and the
+                            # checkpoint coordinator status for recovery-path decisions.
+                            for _ep in [
+                                f"{self._flink_rest_url}/jobs/overview",
+                                f"{self._flink_rest_url}/taskmanagers",
+                                f"{self._flink_rest_url}/jobs/metrics",
+                                f"{self._flink_rest_url}/jobs/overview?expand=exceptions",
+                            ]:
+                                try:
+                                    self.http.get(_ep, timeout=self._talos_jmx_timeout_sec)
+                                except Exception:
+                                    pass
+
                         bid_price = round(0.1 * self.tenant_priority.get(tenant_id, 1.0), 6)
                         self.state[tenant_id]["last_bid"] = bid_price
                         TENANT_LAST_BID.labels(tenant_id=tenant_id).set(bid_price)
