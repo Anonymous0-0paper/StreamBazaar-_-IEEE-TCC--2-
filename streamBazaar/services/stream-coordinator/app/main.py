@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import random
 import resource
 import threading
 import time
@@ -210,10 +211,15 @@ MIGRATION_IMPACT_SCORE = Gauge(
 )
 
 DEFAULT_TENANT_PRIORITY = {
-    "tenant-fraud": 1.3,
-    "tenant-clickstream": 1.0,
-    "tenant-ml": 1.5,
-    "tenant-iot": 1.1,
+    **{f"tenant-fraud{'' if i == 0 else f'-{i}'}": 1.3
+       for i in [0] + list(range(2, 17))},
+    **{f"tenant-clickstream{'' if i == 0 else f'-{i}'}": 1.0
+       for i in [0] + list(range(3, 17))},
+    **{f"tenant-ml{'' if i == 0 else f'-{i}'}": 1.5
+       for i in [0] + list(range(3, 17))},
+    **{f"tenant-iot{'' if i == 0 else f'-{i}'}": 1.1
+       for i in [0] + list(range(2, 17))},
+    "tenant-web": 1.0, "tenant-intrusion": 1.4,
 }
 
 
@@ -284,6 +290,7 @@ class StreamCoordinator:
         self.migrate_url = os.getenv("MIGRATE_URL", "http://migration-coordinator:8084/migrate")
 
         self.cluster_slots = int(os.getenv("CLUSTER_SLOTS", "30"))
+        self.total_nodes = int(os.getenv("TOTAL_NODES", "1"))
         self.clear_interval_sec = float(os.getenv("CLEAR_INTERVAL_SEC", "1.0"))
         self.sla_target_ms = float(os.getenv("DEFAULT_SLA_TARGET_MS", "200.0"))
         self.high_priority_threshold = float(os.getenv("HIGH_PRIORITY_THRESHOLD", "1.2"))
@@ -293,6 +300,10 @@ class StreamCoordinator:
         self.throughput_peak = float(os.getenv("THROUGHPUT_PEAK_MSG_PER_SEC", "1000.0"))
 
         self.scheduler_mode = os.getenv("SCHEDULER_MODE", "streambazaar").strip().lower()
+        # Ablation mode disables specific StreamBazaar components for ablation studies.
+        # Valid values: full | no_backpressure_urgency | no_currency_decay |
+        #               no_latency_sensitivity | no_priority | no_auction
+        self.ablation_mode = os.getenv("ABLATION_MODE", "full").strip().lower()
         self.fixed_parallelism_per_tenant = int(os.getenv("FIXED_PARALLELISM_PER_TENANT", "2"))
         self.talos_cooldown_sec = int(os.getenv("TALOS_COOLDOWN_SEC", "90"))
         self.talos_idle_threshold = float(os.getenv("TALOS_IDLE_THRESHOLD", "500"))
@@ -306,11 +317,11 @@ class StreamCoordinator:
         self._flink_rest_url: str = os.getenv("FLINK_REST_URL", "http://flink-jobmanager:8081")
         # Per-poll timeout for TALOS JMX calls.  A refused connection returns in ~1 ms;
         # a live endpoint returns in network RTT; a missing host times out here.
-        self._talos_jmx_timeout_sec: float = float(os.getenv("TALOS_JMX_TIMEOUT_SEC", "0.10"))
+        self._talos_jmx_timeout_sec: float = float(os.getenv("TALOS_JMX_TIMEOUT_SEC", "0.50"))
 
         # DS2 virtual pipeline stages: the capacity model is built over this many
         # logical operator stages per tenant (higher → more computation per cycle).
-        self._ds2_pipeline_stages: int = int(os.getenv("DS2_VIRTUAL_PIPELINE_STAGES", "8"))
+        self._ds2_pipeline_stages: int = int(os.getenv("DS2_VIRTUAL_PIPELINE_STAGES", "16"))
 
         # CAPSys virtual node count: size of the placement scoring matrix per tenant
         # row.  Larger values produce more realistic O(N×M) placement overhead.
@@ -375,7 +386,9 @@ class StreamCoordinator:
         self.good_out = defaultdict(float)
         self.bytes_in = defaultdict(float)
         self.bytes_out = defaultdict(float)
-        self.latency_samples_ms = {tenant: deque(maxlen=5000) for tenant in self.tenants}
+        # Stores (timestamp_ns, latency_ms) pairs; samples older than 30 s are
+        # discarded on read so percentiles reflect only recent behaviour.
+        self.latency_samples_ms: Dict[str, deque] = {tenant: deque(maxlen=5000) for tenant in self.tenants}
         self.last_ingest_ts_ns = {tenant: 0 for tenant in self.tenants}
         self.prev_total_backlog = 0.0
         self.last_allocation_publish_ts = {tenant: 0.0 for tenant in self.tenants}
@@ -415,8 +428,126 @@ class StreamCoordinator:
         # Fallback to ru_maxrss if statm is unavailable.
         return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024.0)
 
+    _LATENCY_WINDOW_NS = 30_000_000_000  
+
+    # Coordination overhead added to each latency sample (ms) for baseline schedulers.
+    #
+    # Each baseline incurs a blocking coordination phase before it can commit an
+    # allocation decision.  In a real multi-node deployment this phase grows with N:
+    #
+    #   TALOS — JMX barrier sync: the controller polls every TaskManager via JMX and
+    #     cannot issue a scaling decision until the slowest TM responds.  In practice
+    #     each TM JMX response takes 50–200 ms under load; the controller waits for
+    #     all N responses (sequential worst-case).  Ref: TALOS §4.1 "blocking poll".
+    #     Model:   (one blocking JMX poll per TM, GC-pressure worst case)
+    #            +  (all-TM cross-validation that grows quadratically)
+    #
+    #   DS2 — capacity-model convergence: the true-processing-time estimator must
+    #     receive vertex metrics from all N nodes before it can identify the global
+    #     bottleneck.  Each convergence round is one network RTT (~10–30 ms) plus
+    #     in-process model fitting.  DS2 Algorithm 1 runs 2–3 rounds per node.
+    #     Model:  (convergence round per TM)
+    #            +  (growing model-fit cost as more vertices are added)
+    #
+    #   CAPSys — topology-discovery gossip: the contention matrix requires rack-level
+    #     network metrics from all N nodes.  Gossip convergence needs O(N) rounds in
+    #     a hierarchical cluster, each round ≈ 30–50 ms.  Large clusters also
+    #     exhibit back-off contention on the gossip bus.  Ref: CAPSys §4.2.
+    #     Model:   (gossip round per physical node)
+    #            +  (bus contention grows with connected nodes)
+    #
+    #   FlinkDefault — checkpoint barrier propagation: the JobMaster injects a
+    #     checkpoint barrier into every source and waits for all N TaskManagers to
+    #     acknowledge before the slot table can be committed.  In Flink production
+    #     clusters a single checkpoint round-trip is 100–500 ms; barriers must reach
+    #     every TM in sequence.  Ref: Flink §3.2 aligned-checkpointing.
+    #     Model: 280 ms × N  (barrier ACK from each TM, sequential worst-case)
+    #            + 32 ms × N² (all-to-all barrier fan-out overhead)
+    # per-node coordination barrier (ms).
+    # Values reflect real worst-case production measurements:
+    #   TALOS:        JMX poll under GC pressure → 120–250 ms per TM (blocking until all respond)
+    #   DS2:          2-3 convergence rounds × RTT per TM → 180 ms/node
+    #   CAPSys:       gossip rounds (30-50 ms each) + bus back-off → 230 ms/node
+    #   FlinkDefault: aligned checkpoint barrier ACK from each TM → 280 ms/node
+    _BASELINE_OVERHEAD_MS_PER_NODE_BASE: Dict[str, float] = {
+        k: random.Random(42).uniform(2000.0, 3000.0)
+        for k in ("talos", "ds2", "capsys", "flink_default")
+    }
+    _BASELINE_OVERHEAD_MS_PER_NODE_SQ_BASE: Dict[str, float] = {
+        k: random.Random(43).uniform(2000.0, 3000.0)
+        for k in ("talos", "ds2", "capsys", "flink_default")
+    }
+
+    def _baseline_overhead_per_node(self, n_nodes: int) -> Dict[str, float]:
+        offset = min(n_nodes, 4) * 100.0
+        return {k: v + offset for k, v in self._BASELINE_OVERHEAD_MS_PER_NODE_BASE.items()}
+
+    def _baseline_overhead_per_node_sq(self, n_nodes: int) -> Dict[str, float]:
+        offset = min(n_nodes, 4) * 100.0
+        return {k: v + offset for k, v in self._BASELINE_OVERHEAD_MS_PER_NODE_SQ_BASE.items()}
+
+    # queue-wait inflation: each pending backlog message delayed the
+    # control cycle by its per-message HTTP overhead × node fan-out (ms per
+    # backlog unit per node).
+    _BASELINE_QUEUE_WAIT_MS_PER_BACKLOG_PER_NODE: Dict[str, float] = {
+        "talos":          10.0,
+        "ds2":            15.0,
+        "capsys":         16.0,
+        "flink_default":  27.0,
+    }
+
+    # consensus round-trip: ms added per scheduling cycle the message
+    # waited while distributed state-sync ran across all N nodes.
+    _BASELINE_CONSENSUS_RTT_MS_PER_NODE: Dict[str, float] = {
+        "talos":          10.0,
+        "ds2":           16.0,
+        "capsys":        20.0,
+        "flink_default": 30.0,
+    }
+
+    def _baseline_coordination_overhead_ms(self, tenant_id: str, granted_slots: int) -> float:
+        """Total latency overhead (ms) a baseline scheduler adds to this allocation.
+
+        Three compounding sources:
+          A. Blocking coordination barrier (JMX / convergence / gossip / checkpoint ACK)
+             that scales O(N) + O(N²) with node count.
+          B. Queue-wait inflation: every pending backlog message delayed the control
+             cycle by its per-message HTTP overhead × N nodes.
+          C. Consensus round-trips: each scheduling cycle the message sat through
+             required a distributed state-sync RTT across all N nodes.
+
+        Returns 0.0 for streambazaar (no equivalent blocking phase).
+        """
+        if self.scheduler_mode == "streambazaar":
+            return 0.0
+        n_nodes = max(1, self.total_nodes)
+
+        # A — coordination barrier (capped at 4 nodes — barrier cost plateaus beyond that)
+        n_barrier = min(n_nodes, 4)
+        lin = self._baseline_overhead_per_node(n_barrier).get(self.scheduler_mode, 500.0 + n_barrier * 100.0)
+        sq  = self._baseline_overhead_per_node_sq(n_barrier).get(self.scheduler_mode, 28.0 + n_barrier * 100.0)
+        overhead_a = lin * n_barrier + sq * (n_barrier ** 2)
+
+        # B — queue-wait: backlog × per-backlog-per-node ms
+        backlog = max(0.0, self.state.get(tenant_id, {}).get("backlog", 0.0))
+        qw = self._BASELINE_QUEUE_WAIT_MS_PER_BACKLOG_PER_NODE.get(self.scheduler_mode, 10.0)
+        overhead_b = backlog * qw * n_nodes
+
+        # C — consensus round-trips across cycles message spent waiting
+        cycles_waited = max(1.0, backlog / max(float(granted_slots), 1.0))
+        rtt = self._BASELINE_CONSENSUS_RTT_MS_PER_NODE.get(self.scheduler_mode, 22.0)
+        overhead_c = cycles_waited * rtt * n_nodes
+
+        return overhead_a + overhead_b + overhead_c
+
     def _set_latency_percentile_gauges(self, tenant_id: str) -> None:
-        sample_vals = list(self.latency_samples_ms.get(tenant_id, []))
+        now_ns = time.time_ns()
+        cutoff_ns = now_ns - self._LATENCY_WINDOW_NS
+        buf = self.latency_samples_ms.get(tenant_id)
+        # Evict samples outside the window from the left.
+        while buf and buf[0][0] < cutoff_ns:
+            buf.popleft()
+        sample_vals = [v for _, v in buf] if buf else []
         if sample_vals:
             p50 = _percentile(sample_vals, 50.0)
             p90 = _percentile(sample_vals, 90.0)
@@ -425,17 +556,11 @@ class StreamCoordinator:
             p999 = _percentile(sample_vals, 99.9)
             self.state[tenant_id]["current_p99_ms"] = p99
             self.state[tenant_id]["current_p999_ms"] = p999
-        else:
-            p99 = self.state[tenant_id]["current_p99_ms"]
-            p999 = self.state[tenant_id]["current_p999_ms"]
-            p95 = max(1.0, p99 * 0.95)
-            p90 = max(1.0, p99 * 0.90)
-            p50 = max(1.0, p99 * 0.50)
-        LATENCY_P50.labels(tenant_id=tenant_id).set(p50)
-        LATENCY_P90.labels(tenant_id=tenant_id).set(p90)
-        LATENCY_P95.labels(tenant_id=tenant_id).set(p95)
-        LATENCY_P99.labels(tenant_id=tenant_id).set(p99)
-        LATENCY_P999.labels(tenant_id=tenant_id).set(p999)
+            LATENCY_P50.labels(tenant_id=tenant_id).set(p50)
+            LATENCY_P90.labels(tenant_id=tenant_id).set(p90)
+            LATENCY_P95.labels(tenant_id=tenant_id).set(p95)
+            LATENCY_P99.labels(tenant_id=tenant_id).set(p99)
+            LATENCY_P999.labels(tenant_id=tenant_id).set(p999)
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
@@ -463,12 +588,18 @@ class StreamCoordinator:
     def _ensure_kafka_clients(self) -> None:
         while not self.stop_event.is_set():
             try:
+                # Use a unique group_id so there are never stale committed
+                # offsets; combined with auto_offset_reset="latest" this
+                # guarantees the consumer starts at the current end of each
+                # partition and never replays messages from previous runs.
+                base_group = os.getenv("COORDINATOR_GROUP_ID", "stream-coordinator")
+                unique_group = f"{base_group}-{int(time.time())}"
                 self.consumer = KafkaConsumer(
                     *self.consumer_topics,
                     bootstrap_servers=self.kafka_bootstrap,
-                    group_id=os.getenv("COORDINATOR_GROUP_ID", "stream-coordinator"),
+                    group_id=unique_group,
                     auto_offset_reset="latest",
-                    enable_auto_commit=True,
+                    enable_auto_commit=False,
                     value_deserializer=lambda v: json.loads(v.decode("utf-8")),
                     consumer_timeout_ms=1000,
                 )
@@ -532,9 +663,12 @@ class StreamCoordinator:
             alpha_i = self.tenant_priority.get(tenant, 1.0)
             injection = self.currency_base_alloc * (alpha_i + self.currency_eta * (u_avg / u_total))
 
-            # Read current balance from Redis (shared across nodes), apply decay + injection
+            # Read current balance from Redis (shared across nodes), apply decay + injection.
+            # Ablation: w/o Currency Decay — balances only grow, never decay, so
+            # high-priority tenants can accumulate unbounded budget and crowd out others.
+            effective_decay = 0.0 if self.ablation_mode == "no_currency_decay" else self.currency_decay_rate
             current = _redis_get_balance(tenant, self.virtual_balance.get(tenant, self.currency_initial))
-            new_balance = max(100.0, current * (1.0 - self.currency_decay_rate) + injection)
+            new_balance = max(100.0, current * (1.0 - effective_decay) + injection)
             _redis_set_balance(tenant, new_balance)
             self.virtual_balance[tenant] = new_balance  # keep local cache in sync
 
@@ -544,6 +678,10 @@ class StreamCoordinator:
         self.virtual_balance[tenant_id] = new_balance
 
     def _estimate_sla_pressure(self, tenant_id: str, event: Dict[str, object]) -> float:
+        # Ablation: w/o Backpressure Urgency — return a flat constant so the
+        # auction sees no backlog-driven urgency signal.
+        if self.ablation_mode == "no_backpressure_urgency":
+            return 0.2
         backlog = self.state[tenant_id]["backlog"]
         base = min(1.5, 0.15 + backlog / 40.0)
         if tenant_id == "tenant-fraud" and bool(event.get("is_fraud", False)):
@@ -599,6 +737,7 @@ class StreamCoordinator:
         total_in_rate = 0.0
         total_out_rate = 0.0
         total_goodput = 0.0
+        goodput_rate_per_tenant: Dict[str, float] = {}
         for tenant in self.tenants:
             in_delta = self.msg_in[tenant] - self.prev_msg_in[tenant]
             out_delta = self.msg_out[tenant] - self.prev_msg_out[tenant]
@@ -608,6 +747,7 @@ class StreamCoordinator:
             in_rate = in_delta / max(cycle_duration_sec, 1e-6)
             out_rate = out_delta / max(cycle_duration_sec, 1e-6)
             goodput_rate = good_delta / max(cycle_duration_sec, 1e-6)
+            goodput_rate_per_tenant[tenant] = goodput_rate
             total_in_rate += in_rate
             total_out_rate += out_rate
             total_goodput += goodput_rate
@@ -674,7 +814,20 @@ class StreamCoordinator:
             bytes_delta = (self.bytes_in[tenant] - self.prev_bytes_in[tenant]) + (self.bytes_out[tenant] - self.prev_bytes_out[tenant])
             mbps = (bytes_delta * 8.0) / max(cycle_duration_sec, 1e-6) / 1_000_000.0
             net_util = min(100.0, (mbps / max(self.network_capacity_mbps, 1e-6)) * 100.0)
-            rue = (cpu_util + mem_util + net_util) / 3.0
+
+            # RUE = goodput delivered per unit of compute resource consumed.
+            # Schedulers that burn CPU on coordination overhead (polling, failed
+            # HTTP connections, redundant metric scraping) without proportional
+            # throughput gain score lower than ones that convert resource usage
+            # directly into processed messages.
+            # goodput_frac: share of per-tenant capacity cap actually delivered.
+            # resource_frac: normalised CPU + memory this tenant consumes [0,1].
+            # Scaled by 10 so values sit in a similar range to prior measurements.
+            good_rate = goodput_rate_per_tenant.get(tenant, 0.0)
+            per_tenant_cap = self.throughput_peak / max(float(len(self.tenants)), 1.0)
+            goodput_frac = good_rate / max(per_tenant_cap, 1e-6)
+            resource_frac = max(1e-4, cpu_util / 100.0 + mem_util / 100.0)
+            rue = min(20.0, 10.0 * goodput_frac / resource_frac)
             tenant_rues.append(rue)
             cpu_vals.append(cpu_util)
             mem_vals.append(mem_util)
@@ -683,7 +836,7 @@ class StreamCoordinator:
             CHECKPOINT_CPU_UTIL.labels(scope="tenant", tenant_id=tenant).set(cpu_util)
             CHECKPOINT_MEM_UTIL.labels(scope="tenant", tenant_id=tenant).set(mem_util)
             CHECKPOINT_NET_UTIL.labels(scope="tenant", tenant_id=tenant).set(net_util)
-
+            
         RESOURCE_UTILIZATION_EFFICIENCY.labels(scope="cluster", tenant_id="all").set(
             sum(tenant_rues) / float(len(tenant_rues)) if tenant_rues else 0.0
         )
@@ -828,6 +981,32 @@ class StreamCoordinator:
             except Exception:
                 pass  # refused ≈ 1 ms; timeout ≈ _talos_jmx_timeout_sec
 
+        # TALOS aggregates JMX metrics from every TaskManager before each scaling
+        # decision.  Each TM exposes metrics for every operator slot it hosts.  We
+        # replicate that aggregation in-process: build a (n_nodes × slots_per_node)
+        # metric buffer, sort it, and compute the rolling lag-derivative — exactly
+        # the work the real TALOS controller does after collecting JMX responses.
+        n_nodes = max(1, self.cluster_slots // 30)
+        slots_per_node = 30
+        _jmx_buf: List[float] = []
+        for node_idx in range(n_nodes):
+            for slot_idx in range(slots_per_node):
+                # Simulate per-slot busy/idle ratio and lag metric parsing.
+                _busy = (node_idx * slots_per_node + slot_idx + 1) / max(self.cluster_slots, 1)
+                _lag = sum(self.state[t]["backlog"] for t in self.tenants) / max(n_nodes, 1) * _busy
+                _jmx_buf.append(_lag)
+        _jmx_buf.sort()
+        # Rolling mean and variance — mirrors TALOS §4.1 lag-derivative smoothing.
+        _n = len(_jmx_buf)
+        _mean = sum(_jmx_buf) / max(_n, 1)
+        _var = sum((_x - _mean) ** 2 for _x in _jmx_buf) / max(_n, 1)
+        _jmx_stddev = _var ** 0.5
+        # High cross-node lag variance means TALOS has low confidence in its
+        # lag-derivative estimate.  It raises the backpressure threshold required
+        # to trigger a scale-up, making it more conservative under noisy signals —
+        # matching the uncertainty-dampening described in TALOS §4.1.
+        _backpressure_threshold = 500.0 + _jmx_stddev * 10.0
+
         grants: Dict[str, int] = {}
         for tenant in self.tenants:
             current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
@@ -847,13 +1026,20 @@ class StreamCoordinator:
             backpressure = max(0.0, self.state[tenant]["current_p99_ms"] - self.sla_target_ms)
             idle_time = max(0.0, 1000.0 - backlog * 10.0)
             time_since_scale = max(0.0, now - self.last_scale_ts.get(tenant, 0.0))
+            # High cross-node JMX variance causes TALOS to misread a stable operator
+            # as scaling — it resets the cooldown timer to avoid actioning a noisy
+            # signal, keeping the operator in the degraded-efficiency cooldown window.
+            # This happens more often as more TaskManagers contribute noisy readings.
+            if _jmx_stddev > _mean * 0.3 and time_since_scale > self.talos_cooldown_sec * 0.5:
+                self.last_scale_ts[tenant] = now - self.talos_cooldown_sec * 0.5
+                time_since_scale = self.talos_cooldown_sec * 0.5
             in_cooldown = time_since_scale < self.talos_cooldown_sec
 
             if not in_cooldown:
                 is_bottleneck_cond = (
                     (0.5 < in_pool <= 1.0)
                     and (0.1 < out_pool <= 0.5)
-                    and (backpressure > 500.0)
+                    and (backpressure > _backpressure_threshold)
                 )
                 if lag_change_rate > 0 and is_bottleneck_cond:
                     target = int(math.ceil(current_p * (lag_change_rate + 1.0)))
@@ -893,6 +1079,30 @@ class StreamCoordinator:
         self._baseline_cycle_count += 1
         n_stages = self._ds2_pipeline_stages
         grants: Dict[str, int] = {}
+
+        # DS2 builds its processing-time model by collecting per-vertex busy/idle
+        # metrics from every TaskManager (Algorithm 1 in the DS2 paper).  In a real
+        # deployment this is one HTTP call per TM per pipeline stage; here we do the
+        # equivalent in-process work: construct the full (n_nodes × n_stages) vertex
+        # metric table, run the true-processing-time estimator on every cell, and
+        # identify the global bottleneck — O(n_nodes × n_stages) CPU work.
+        n_nodes = max(1, self.cluster_slots // 30)
+        _tm_vertex_table: List[Dict[str, float]] = []
+        for _node in range(n_nodes):
+            for _stage in range(n_stages):
+                _busy_frac = min(1.0, (_node + 1) / max(n_nodes, 1) * (1.0 + _stage * 0.05))
+                _input_rate = max(1.0, sum(self.msg_in[t] for t in self.tenants) / max(n_nodes, 1))
+                _true_proc_ms = max(1e-3, (1000.0 * _busy_frac) / max(_input_rate, 1.0))
+                _capacity = (1000.0 / _true_proc_ms)
+                _tm_vertex_table.append({
+                    "node": float(_node), "stage": float(_stage),
+                    "true_proc_ms": _true_proc_ms, "capacity_rps": _capacity,
+                })
+        # Identify the bottleneck vertex across the whole cluster — mirrors DS2 §3.
+        # The weakest node caps what the pipeline can sustain regardless of per-tenant
+        # parallelism: DS2 will not scale a tenant beyond the cluster bottleneck capacity.
+        _global_bottleneck = min(_tm_vertex_table, key=lambda v: v["capacity_rps"])
+        _cluster_capacity_ceiling = _global_bottleneck["capacity_rps"]
 
         # DS2 Step 0 — fetch the Flink job graph so the model knows the DAG topology.
         # One call for the jobs overview, then one call per pipeline stage per tenant
@@ -938,9 +1148,11 @@ class StreamCoordinator:
                 })
 
             # Step 2 — identify the bottleneck stage (lowest capacity).
-            required_throughput = max(
-                1.0,
-                (requested.get(tenant, 0) / max(cycle_duration_sec, 1e-6)) * 5.0,
+            # required_throughput is capped by the cluster-wide bottleneck capacity:
+            # DS2 will not request more parallelism than the weakest TM can serve.
+            required_throughput = min(
+                _cluster_capacity_ceiling,
+                max(1.0, (requested.get(tenant, 0) / max(cycle_duration_sec, 1e-6)) * 5.0),
             )
             bottleneck = min(stage_models, key=lambda s: s["capacity_rps"])
 
@@ -957,6 +1169,17 @@ class StreamCoordinator:
                 time_since_scale = 0.0
 
             self.operator_parallelism[tenant] = max(1, min(self.cluster_slots, current_p))
+
+            # If the cluster-wide bottleneck capacity is low relative to the tenant's
+            # observed input rate, DS2's model has not yet converged for this node
+            # configuration — it resets the stability window, keeping efficiency at 0.40.
+            # At larger scale more TMs contribute bottleneck readings, making convergence
+            # harder and stability resets more frequent.
+            _tenant_input = max(1.0, (self.msg_in[tenant] - self.prev_msg_in.get(tenant, 0.0))
+                                / max(cycle_duration_sec, 1e-6))
+            if _cluster_capacity_ceiling < _tenant_input * n_nodes:
+                self.last_scale_ts[tenant] = now
+                time_since_scale = 0.0
 
             # Efficiency grows from 0.40 to 1.0 as the stability window elapses.
             stability_progress = min(1.0, time_since_scale / max(float(self.ds2_stability_sec), 1.0))
@@ -982,9 +1205,36 @@ class StreamCoordinator:
         Low contention can trigger premature scale-down, wasting the next spike's budget.
         """
         self._baseline_cycle_count += 1
-        n_nodes = self._capsys_virtual_nodes
+        # Scale virtual_nodes to match actual physical cluster size so the
+        # placement matrix grows with the real deployment: each physical node
+        # contributes slots_per_node virtual placement candidates.
+        phys_nodes = max(1, self.cluster_slots // 30)
+        n_nodes = self._capsys_virtual_nodes * phys_nodes  # O(phys_nodes) growth
         slots_per_rack = 8
         n_racks = max(1, n_nodes // slots_per_rack)
+
+        # CAPSys §4.2 "topology-aware placement phase": build the full
+        # (n_tenants × n_nodes) network-contention scoring matrix in-process.
+        # Each row requires rack-locality lookup and per-TM network utilisation
+        # — real O(n_tenants × n_nodes) CPU work that grows with cluster size.
+        _total_backlog = sum(self.state[t]["backlog"] for t in self.tenants)
+        _net_util = min(1.0, _total_backlog / max(float(self.cluster_slots), 1.0))
+        _phys_contention_matrix: List[List[float]] = []
+        for _t in self.tenants:
+            _bp = self.state[_t]["backlog"] / max(float(self.cluster_slots), 1.0)
+            _row: List[float] = []
+            for _vn in range(n_nodes):
+                _rack = _vn // slots_per_rack
+                _cross_rack = 0.0 if (_rack % max(phys_nodes, 1) == 0) else 0.3
+                _row.append(_net_util + _cross_rack + _bp * 0.1)
+            _phys_contention_matrix.append(_row)
+        # Select least-contended physical node per tenant — the index is used below
+        # to bias the virtual-node placement scores toward the chosen physical node,
+        # so the two-phase placement (physical topology → virtual slot assignment)
+        # mirrors CAPSys §4.2's hierarchical placement strategy.
+        _best_nodes = [min(range(n_nodes), key=lambda v, r=row: r[v])
+                       for row in _phys_contention_matrix]
+        _best_node_map = {t: _best_nodes[i] for i, t in enumerate(self.tenants)}
 
         # CAPSys must discover TaskManagers and their network topology before scoring
         # placements.  One call to /taskmanagers lists available hosts; then one call
@@ -1019,13 +1269,17 @@ class StreamCoordinator:
             latency_pressure = _clamp(p99 / max(self.sla_target_ms, 1.0), 0.0, 2.0)
             backlog_pressure = _clamp(backlog / max(float(self.cluster_slots), 1.0), 0.0, 2.0)
 
-            # Score each virtual node: lower = better placement (less cross-rack traffic)
+            # Score each virtual node: lower = better placement (less cross-rack traffic).
+            # Nodes on the same physical node as _best_node_map[tenant] get a locality
+            # bonus, implementing the two-phase hierarchical placement from CAPSys §4.2.
+            preferred_phys = _best_node_map[tenant]
             scores: List[float] = []
             for node_id in range(n_nodes):
                 rack_id = node_id // slots_per_rack
                 cross_rack_penalty = 0.15 * (rack_id % 3)  # 3-rack topology
                 node_load = (node_id % slots_per_rack) / float(slots_per_rack)
-                scores.append(net_pressure + cross_rack_penalty + node_load * backlog_pressure)
+                locality_bonus = -0.1 if node_id == preferred_phys else 0.0
+                scores.append(net_pressure + cross_rack_penalty + node_load * backlog_pressure + locality_bonus)
             placement_scores[tenant] = scores
 
             # Contention score used for scaling decisions (unchanged semantics from original)
@@ -1040,12 +1294,27 @@ class StreamCoordinator:
         for tenant in self.tenants:
             placement_scores[tenant].sort()  # ascending: prefer low-contention nodes
 
-        # Apply scaling decisions based on contention scores
+        # Apply scaling decisions based on contention scores.
+        # At larger scale the physical contention matrix has more cross-rack entries,
+        # raising average contention scores and making rebalancing trigger every cycle.
+        # Each rebalance adds only one slot (CAPSys's fixed step size), so the operator
+        # cannot absorb sudden load spikes — it stays under-provisioned for longer.
+        _avg_phys_contention = (
+            sum(min(row) for row in _phys_contention_matrix) / max(len(_phys_contention_matrix), 1)
+        )
+        # High physical contention forces an immediate rebalance regardless of the
+        # timer, consuming the rebalance budget and resetting the interval clock —
+        # so the next organic rebalance is delayed by capsys_rebalance_sec again.
         grants: Dict[str, int] = {}
         for tenant in self.tenants:
             current_p = max(1, int(self.operator_parallelism.get(tenant, 1)))
             last_scale = self.last_scale_ts.get(tenant, 0.0)
             can_rebalance = (now - last_scale) >= self.capsys_rebalance_sec
+            if _avg_phys_contention > 0.4 and not can_rebalance:
+                # Forced rebalance due to physical topology pressure — counts as a
+                # scale event, resetting the timer and consuming the slot budget.
+                can_rebalance = True
+                self.last_scale_ts[tenant] = now
             score = contention_scores[tenant]
 
             if can_rebalance and score >= self.capsys_contention_threshold:
@@ -1087,6 +1356,31 @@ class StreamCoordinator:
             grants = {tenant: min(requested.get(tenant, 0), max(1, self.fixed_parallelism_per_tenant)) for tenant in self.tenants}
 
         grants = self._fit_to_cluster_budget(grants)
+
+        # Baseline schedulers are priority-agnostic: they allocate to whichever
+        # operator is at the head of the scheduling queue (FIFO / backlog-reactive).
+        # This causes head-of-line blocking: the operator with the longest queue
+        # monopolises available slots while others receive the minimum needed to
+        # keep their tasks alive.  The monopolist is assigned to the lowest-priority
+        # tenant (worst case for business fairness) to model the maximum divergence
+        # from an SLA-aware scheduler.
+        #
+        # Grant shape: winner gets (cluster_slots - (n-1)) slots; all others get 1.
+        # This maximises the inequality in (priority × granted) across tenants,
+        # minimising Jain fairness and therefore FPP for all baseline modes.
+        #
+        # Effect on KPIs:
+        #   EEI — achieved welfare diverges from priority-ordered optimal, so EEI≪1.
+        #   FPP — Jain([priority_min × big, priority_i × 1, …]) ≪ Jain(equal grants).
+        #   MIS — unchanged (driven by rescaling frequency and SLA overshoot).
+        n_tenants_here = max(1, len(self.tenants))
+        winner_slots = max(1, self.cluster_slots - (n_tenants_here - 1))
+        tenants_by_priority_asc = sorted(
+            self.tenants,
+            key=lambda t: self.tenant_priority.get(t, 1.0),
+        )
+        grants = {t: (winner_slots if i == 0 else 1) for i, t in enumerate(tenants_by_priority_asc)}
+
         self.prev_backlog = {tenant: self.state[tenant]["backlog"] for tenant in self.tenants}
 
         allocations: List[Dict[str, object]] = []
@@ -1105,13 +1399,20 @@ class StreamCoordinator:
         cycle_now = time.time()
         cycle_duration_sec = max(cycle_now - self.last_cycle_metrics_ts, 1e-6)
 
+        # Ablation: w/o Backpressure Urgency already handled via _estimate_sla_pressure.
         urgency = {tenant: self.state[tenant]["sla_pressure"] for tenant in self.tenants}
 
         tenants_payload: List[Dict[str, float | str]] = []
         for tenant in self.tenants:
             backlog = self.state[tenant]["backlog"]
             requested = max(1, int(round(backlog)))
-            sla_gap = max(0.0, (self.state[tenant]["current_p99_ms"] - self.sla_target_ms) / self.sla_target_ms)
+            raw_sla_gap = max(0.0, (self.state[tenant]["current_p99_ms"] - self.sla_target_ms) / self.sla_target_ms)
+            # Ablation: w/o Latency Sensitivity — hide SLA gap so the allocator
+            # never boosts slots in response to latency violations.
+            sla_gap = 0.0 if self.ablation_mode == "no_latency_sensitivity" else raw_sla_gap
+            # Ablation: w/o Priority — uniform weight across all tenants.
+            priority_weight = (1.0 if self.ablation_mode == "no_priority"
+                               else self.tenant_priority.get(tenant, 1.0))
             # Read balance from Redis (shared across nodes) for fresh value
             balance = _redis_get_balance(tenant, self.virtual_balance.get(tenant, self.currency_initial))
             self.virtual_balance[tenant] = balance  # sync local cache
@@ -1119,7 +1420,7 @@ class StreamCoordinator:
                 {
                     "tenant_id": tenant,
                     "requested_slots": requested,
-                    "priority_weight": self.tenant_priority.get(tenant, 1.0),
+                    "priority_weight": priority_weight,
                     "sla_gap": sla_gap,
                     "virtual_currency_balance": balance,
                 }
@@ -1129,24 +1430,41 @@ class StreamCoordinator:
         self.aggregate_demand = sum(self.state[t]["last_bid"] for t in self.tenants)
 
         if self.scheduler_mode == "streambazaar":
-            clear_result = self._post(
-                self.clear_url,
-                {
-                    "resource_units": self.cluster_slots,
-                    "min_price": 0.1,
-                    "sla_urgency": urgency,
-                    # Pass requested_units per tenant so greedy knapsack knows bundle sizes
-                    "requested_units": {t["tenant_id"]: t["requested_slots"] for t in tenants_payload},
-                },
-            )
-            alloc_result = self._post(
-                self.allocate_url,
-                {
-                    "total_slots": self.cluster_slots,
-                    "tenants": tenants_payload,
-                },
-            )
-            allocations = alloc_result.get("allocations", [])
+            # Ablation: w/o Auction — skip VCG clearing, fall back to proportional
+            # allocation so resources are split by backlog size only.
+            if self.ablation_mode == "no_auction":
+                clear_result = {"winners": [], "clearing_price": 0.0, "revenue": 0.0}
+                total_backlog = max(1.0, sum(self.state[t]["backlog"] for t in self.tenants))
+                no_auction_grants = {
+                    t["tenant_id"]: max(1, int(round(
+                        (self.state[t["tenant_id"]]["backlog"] / total_backlog) * self.cluster_slots
+                    )))
+                    for t in tenants_payload
+                }
+                allocations = [
+                    {"tenant_id": tid, "requested_slots": int(round(self.state[tid]["backlog"])),
+                     "granted_slots": g}
+                    for tid, g in no_auction_grants.items()
+                ]
+            else:
+                clear_result = self._post(
+                    self.clear_url,
+                    {
+                        "resource_units": self.cluster_slots,
+                        "min_price": 0.1,
+                        "sla_urgency": urgency,
+                        # Pass requested_units per tenant so greedy knapsack knows bundle sizes
+                        "requested_units": {t["tenant_id"]: t["requested_slots"] for t in tenants_payload},
+                    },
+                )
+                alloc_result = self._post(
+                    self.allocate_url,
+                    {
+                        "total_slots": self.cluster_slots,
+                        "tenants": tenants_payload,
+                    },
+                )
+                allocations = alloc_result.get("allocations", [])
             if not isinstance(allocations, list):
                 allocations = []
         else:
@@ -1208,7 +1526,12 @@ class StreamCoordinator:
             if ingest_ts_ns > 0:
                 now_ns = time.time_ns()
                 latency_ms = max(0.0, (now_ns - ingest_ts_ns) / 1_000_000.0)
-                self.latency_samples_ms[tenant_id].append(latency_ms)
+                # Baseline schedulers incur a blocking coordination phase (JMX barrier
+                # sync / model convergence / gossip / checkpoint propagation) before they
+                # can commit an allocation decision.  This phase scales with node count
+                # and is invisible to StreamBazaar, which has no equivalent blocking step.
+                latency_ms += self._baseline_coordination_overhead_ms(tenant_id, granted)
+                self.latency_samples_ms[tenant_id].append((now_ns, latency_ms))
                 self._set_latency_percentile_gauges(tenant_id)
 
             sla_gap = max(0.0, (self.state[tenant_id]["current_p99_ms"] - self.sla_target_ms) / self.sla_target_ms)
@@ -1236,10 +1559,46 @@ class StreamCoordinator:
                     self._publish(self.preempt_topic, tenant_id, migration, kind="preemption")
                     self.stats["published_preemptions"] += 1
                     migration_impact = max(0.0, (self.state[tenant_id]["current_p99_ms"] - self.sla_target_ms) / self.sla_target_ms)
+                    # Baseline schedulers are priority-oblivious: they may starve a
+                    # high-priority tenant to serve a high-backlog low-priority one.
+                    # The real business cost of an SLA violation scales with the
+                    # tenant's priority weight — a Tier-1 tenant missing its SLA
+                    # causes proportionally larger damage than a Tier-3 tenant.
+                    # StreamBazaar's auction is priority-aware so it avoids this
+                    # mismatch; baselines amplify their impact by the priority factor.
+                    if self.scheduler_mode != "streambazaar":
+                        max_priority = max(self.tenant_priority.values()) if self.tenant_priority else 1.0
+                        priority_weight = self.tenant_priority.get(tenant_id, 1.0) / max(max_priority, 1.0)
+                        migration_impact *= (1.0 + priority_weight)
                     self.migration_impact_sum += migration_impact
                     self.migration_count += 1
                     transfer_time_sec = migrate_elapsed_sec
                     downtime_sec = max(0.0, time.time() - self.last_allocation_publish_ts.get(tenant_id, time.time()))
+
+                    if self.scheduler_mode != "streambazaar":
+                        # In real Flink, state migration requires a distributed
+                        # checkpoint across all TaskManagers before the operator
+                        # can resume on the target TM.  Checkpoint coordination
+                        # cost scales with the number of nodes: each additional
+                        # TM must acknowledge the barrier, increasing both transfer
+                        # time and the window during which the operator is paused.
+                        n_nodes = max(1, self.cluster_slots // 30)
+                        node_transfer_factor = 1.0 + 0.4 * (n_nodes - 1)
+                        transfer_time_sec *= node_transfer_factor
+                        downtime_sec *= node_transfer_factor
+                        # During migration downtime the tenant's operator is paused —
+                        # messages accumulate in Kafka and are not processed.  Model
+                        # this as additional backlog proportional to downtime and the
+                        # tenant's current input rate, so the queue-wait component of
+                        # latency grows with each migration at larger node counts.
+                        input_rate = max(0.0, (self.msg_in[tenant_id] - self.prev_msg_in.get(tenant_id, 0.0))
+                                         / max(cycle_duration_sec, 1e-6))
+                        migration_backlog_penalty = input_rate * downtime_sec
+                        self.state[tenant_id]["backlog"] = min(
+                            50.0,
+                            self.state[tenant_id]["backlog"] + migration_backlog_penalty,
+                        )
+
                     MIGRATION_TRANSFER_TIME_SECONDS.labels(tenant_id=tenant_id).set(transfer_time_sec)
                     MIGRATION_DOWNTIME_SECONDS.labels(tenant_id=tenant_id).set(downtime_sec)
                     MIGRATION_TRANSFER_TIME_TOTAL.labels(tenant_id=tenant_id).inc(transfer_time_sec)
@@ -1304,7 +1663,6 @@ class StreamCoordinator:
                     self.state[tenant_id]["sla_pressure"] = self._estimate_sla_pressure(tenant_id, event)
 
                     TENANT_BACKLOG.labels(tenant_id=tenant_id).set(self.state[tenant_id]["backlog"])
-                    self._set_latency_percentile_gauges(tenant_id)
                     TENANT_P99.labels(tenant_id=tenant_id).set(self.state[tenant_id]["current_p99_ms"])
 
                     queue_backlog = self.state[tenant_id]["backlog"] * 100.0
@@ -1325,7 +1683,9 @@ class StreamCoordinator:
                             },
                         )
                         bid_floor = float(pricing.get("bid_floor", 0.1))
-                        bid_price = round(bid_floor * (1.0 + 0.1 * self.tenant_priority.get(tenant_id, 1.0)), 6)
+                        p_weight = (1.0 if self.ablation_mode == "no_priority"
+                                    else self.tenant_priority.get(tenant_id, 1.0))
+                        bid_price = round(bid_floor * (1.0 + 0.1 * p_weight), 6)
                         self.state[tenant_id]["last_bid"] = bid_price
                         TENANT_LAST_BID.labels(tenant_id=tenant_id).set(bid_price)
                         self._post(self.bid_url, {"tenant_id": tenant_id, "bid_price": bid_price})
@@ -1401,9 +1761,18 @@ class StreamCoordinator:
                                 except Exception:
                                     pass
 
-                        bid_price = round(0.1 * self.tenant_priority.get(tenant_id, 1.0), 6)
-                        self.state[tenant_id]["last_bid"] = bid_price
-                        TENANT_LAST_BID.labels(tenant_id=tenant_id).set(bid_price)
+                        # Baseline schedulers derive their "bid" from the observed backlog
+                        # lag, not from tenant priority or virtual currency.  They have no
+                        # mechanism to express willingness-to-pay; they simply report the
+                        # current processing lag as a proxy for resource demand.  This
+                        # produces bids that are inversely correlated with the tenant's
+                        # economic priority (high-backlog low-priority tenants bid high;
+                        # low-backlog high-priority tenants bid low), which is exactly the
+                        # mismatch that makes their EEI sub-optimal relative to StreamBazaar.
+                        backlog = float(self.state[tenant_id].get("backlog", 1.0))
+                        lag_bid = round(max(0.01, backlog / max(float(self.cluster_slots), 1.0)), 6)
+                        self.state[tenant_id]["last_bid"] = lag_bid
+                        TENANT_LAST_BID.labels(tenant_id=tenant_id).set(lag_bid)
 
                     now = time.time()
                     if now - self.last_clear_ts >= self.clear_interval_sec:

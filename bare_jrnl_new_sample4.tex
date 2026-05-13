@@ -674,7 +674,11 @@ We compare \texttt{StreamBazaar} against four baseline schedulers adapted for Ch
 
 \textbf{Metrics.} We evaluate the systems using five critical metrics that capture performance and economic efficiency:
 \begin{itemize}[leftmargin=*,wide]
-    \item \textit{Resource Utilization Efficiency (RUE)}: \textcolor{blue}{Calculated as the arithmetic average of CPU, memory, and network bandwidth utilization. This provides a single scalar to evaluate multi-dimensional resource packing and cluster-wide saturation.}
+    \item \textit{Resource Utilization Efficiency (RUE)}: Ratio of goodput delivered to compute resources consumed, defined as:
+    \(
+    \text{RUE} = 10 \cdot \dfrac{\dot{\gamma}_i / \dot{\gamma}_i^{\max}}{u_i^{\text{cpu}} + u_i^{\text{mem}}},
+    \)
+    where $\dot{\gamma}_i$ is the per-tenant goodput rate, $\dot{\gamma}_i^{\max}$ is the per-tenant capacity cap, and $u_i^{\text{cpu}}, u_i^{\text{mem}} \in [0,1]$ are the fractional CPU and memory utilizations attributed to tenant $i$. Higher RUE indicates that the scheduler converts allocated resources into processed messages efficiently, without wasting capacity on coordination overhead. The cluster-level RUE is the arithmetic mean across all tenants.
     
     \item \textit{Tail Latency Violation Rate (TLVR)}: Percentage of time windows where the 99.9th percentile latency exceeds SLA requirements for high-priority applications, \textcolor{blue}{capturing the system's ability to strictly enforce QoS constraints during traffic spikes, an insight that raw latency percentiles obscure.}
     

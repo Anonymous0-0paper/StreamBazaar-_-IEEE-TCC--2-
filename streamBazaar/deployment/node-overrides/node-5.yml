@@ -15,10 +15,11 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
-      TENANT_IDS: tenant-web,tenant-clickstream-4
-      SCHEDULER_MODE: streambazaar
+      TENANT_IDS: tenant-web,tenant-clickstream-4,tenant-clickstream-6,tenant-clickstream-8
+      SCHEDULER_MODE: ds2
       COORDINATOR_GROUP_ID: stream-coordinator-node5
       NODE_ID: "5"
+      TOTAL_NODES: "8"
       CLUSTER_SLOTS: "30"
       PRICING_URL: http://sb-pricing-engine-node5:8081/price
       BID_URL: http://auction-orchestrator:8080/bid

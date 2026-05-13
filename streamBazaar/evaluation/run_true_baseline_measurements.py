@@ -184,10 +184,20 @@ def main() -> None:
     mode_results: Dict[str, Dict[str, float]] = {}
     mode_csv: Dict[str, str] = {}
 
+    # Derive tenant list for the CSV exporter from the workload tenant-ids arg
+    # so they always stay in sync.
+    csv_tenants = args.tenant_id  # e.g. "tenant-iot,tenant-fraud"
+
     for mode in MODES:
         print(f"[true-baseline] mode={mode}")
         run(["docker", "compose", "up", "-d", "--build", "stream-coordinator"], cwd=root, env={"SCHEDULER_MODE": mode})
         wait_for_stream_coordinator_mode(mode)
+
+        # Brief stabilisation pause: Kafka consumer group rebalancing after a
+        # coordinator restart can cause the first producer flush to time out.
+        # Waiting 5 s lets the new coordinator complete its Kafka subscription
+        # before we start injecting records.
+        time.sleep(5)
 
         workload_cmd = [
             "python3", "scripts/run_workloads.py",
@@ -206,7 +216,7 @@ def main() -> None:
                     "python3", "evaluation/export_prometheus_csv.py",
                     "--duration-sec", str(args.duration_sec),
                     "--interval-sec", "1",
-                    "--tenants", "tenant-fraud,tenant-clickstream,tenant-ml,tenant-iot",
+                    "--tenants", csv_tenants,
                     "--out-dir", str(run_dir / "csv" / mode),
                 ],
                 cwd=root,

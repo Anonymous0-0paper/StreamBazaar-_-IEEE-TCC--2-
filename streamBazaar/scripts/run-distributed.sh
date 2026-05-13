@@ -41,14 +41,26 @@ fi
 
 # ── Full tenant list (add more as needed) ─────────────────────────────────
 ALL_TENANTS=(
-  tenant-fraud tenant-clickstream tenant-ml tenant-iot
-  tenant-fraud-2 tenant-web tenant-intrusion tenant-iot-2
-  tenant-fraud-3 tenant-clickstream-3 tenant-ml-3 tenant-iot-3
-  tenant-fraud-4 tenant-clickstream-4 tenant-ml-4 tenant-iot-4
+  tenant-fraud    tenant-clickstream    tenant-ml    tenant-iot
+  tenant-fraud-2  tenant-web            tenant-intrusion tenant-iot-2
+  tenant-fraud-3  tenant-clickstream-3  tenant-ml-3  tenant-iot-3
+  tenant-fraud-4  tenant-clickstream-4  tenant-ml-4  tenant-iot-4
+  tenant-fraud-5  tenant-clickstream-5  tenant-ml-5  tenant-iot-5
+  tenant-fraud-6  tenant-clickstream-6  tenant-ml-6  tenant-iot-6
+  tenant-fraud-7  tenant-clickstream-7  tenant-ml-7  tenant-iot-7
+  tenant-fraud-8  tenant-clickstream-8  tenant-ml-8  tenant-iot-8
+  tenant-fraud-9  tenant-clickstream-9  tenant-ml-9  tenant-iot-9
+  tenant-fraud-10 tenant-clickstream-10 tenant-ml-10 tenant-iot-10
+  tenant-fraud-11 tenant-clickstream-11 tenant-ml-11 tenant-iot-11
+  tenant-fraud-12 tenant-clickstream-12 tenant-ml-12 tenant-iot-12
+  tenant-fraud-13 tenant-clickstream-13 tenant-ml-13 tenant-iot-13
+  tenant-fraud-14 tenant-clickstream-14 tenant-ml-14 tenant-iot-14
+  tenant-fraud-15 tenant-clickstream-15 tenant-ml-15 tenant-iot-15
+  tenant-fraud-16 tenant-clickstream-16 tenant-ml-16 tenant-iot-16
 )
 
 # Use first NODE_COUNT*2 tenants so each node gets at least 2
-TOTAL_TENANTS=$(( NODE_COUNT < 4 ? 4 : NODE_COUNT * 2 ))
+TOTAL_TENANTS=$(( NODE_COUNT * 4 ))
 TOTAL_TENANTS=$(( TOTAL_TENANTS > ${#ALL_TENANTS[@]} ? ${#ALL_TENANTS[@]} : TOTAL_TENANTS ))
 TENANTS=("${ALL_TENANTS[@]:0:$TOTAL_TENANTS}")
 
@@ -120,6 +132,7 @@ services:
       SCHEDULER_MODE: ${SCHEDULER_MODE}
       COORDINATOR_GROUP_ID: stream-coordinator-node${n}
       NODE_ID: "${n}"
+      TOTAL_NODES: "${NODE_COUNT}"
       CLUSTER_SLOTS: "30"
       PRICING_URL: http://sb-pricing-engine-node${n}:8081/price
       BID_URL: http://${BID_HOST}/bid

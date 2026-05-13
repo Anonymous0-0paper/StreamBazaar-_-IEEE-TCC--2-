@@ -203,6 +203,7 @@ def publish_records(
             event["record_id"] = event.get("record_id", event.get("event_id", event.get("request_id", f"rec-{int(now*1000)}")))
             event["recordId"] = str(event["record_id"])
             event["timestamp"] = now
+            event["ingest_ts_ns"] = time.time_ns()
             event["workload"] = event.get("workload", dataset.replace("-", "_"))
             event["dataset"] = dataset
             event["priority"] = priorities[dataset]
@@ -243,8 +244,8 @@ def publish_records(
             if sleep_s > 0:
                 time.sleep(sleep_s)
 
-    producer.flush(timeout=10)
-    producer.close(timeout=10)
+    producer.flush(timeout=60)
+    producer.close(timeout=60)
     print(
         json.dumps(
             {

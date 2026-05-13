@@ -16,7 +16,7 @@ class CriteoLoader(BaseLoader):
         super().__init__(dataset_dir=dataset_dir, logger=logger)
 
     def _resolve_source_file(self) -> Path:
-        candidates = ["train.txt", "train_subset.txt", "train.csv", "random_submission.csv"]
+        candidates = ["random_submission.csv"]
         for file_name in candidates:
             candidate = self.dataset_dir / file_name
             if candidate.exists():
