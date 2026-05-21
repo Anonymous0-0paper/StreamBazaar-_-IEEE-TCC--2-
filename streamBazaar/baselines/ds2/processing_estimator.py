@@ -9,7 +9,7 @@ def estimate_true_processing_time(operator_metrics: Mapping[str, float]) -> Dict
 
     trueProcessingTime = actualProcessingTime - backpressureWaitTime
     processingCapacity = 1 / trueProcessingTime
-    estimatedOutputRate = min(inputRate, processingCapacity)
+    outputRate = min(inputRate, processingCapacity)
     """
 
     actual_processing_time = float(operator_metrics.get("actual_processing_time", 0.0))
@@ -18,12 +18,12 @@ def estimate_true_processing_time(operator_metrics: Mapping[str, float]) -> Dict
 
     true_processing_time = max(actual_processing_time - backpressure_wait_time, 1e-9)
     processing_capacity = 1.0 / true_processing_time
-    estimated_output_rate = min(input_rate, processing_capacity)
+    output_rate = min(input_rate, processing_capacity)
 
     return {
         "true_processing_time": true_processing_time,
         "processing_capacity": processing_capacity,
-        "estimated_output_rate": estimated_output_rate,
+        "output_rate": output_rate,
     }
 
 

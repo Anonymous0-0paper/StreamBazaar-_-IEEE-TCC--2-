@@ -111,17 +111,18 @@ def load_kpis_from_csv(csv_path: Path, warmup_sec: int = 15) -> Dict[str, float]
     if not any(abs(v) > 1e-12 for v in goodput_series):
         goodput_series = out_series
 
+    goodput_avg = _mean_nonzero(goodput_series)
     out_avg = _mean_nonzero(out_series)
     in_avg = _mean_nonzero(in_series)
 
     return {
         **latency,
-        "throughput_out_avg": out_avg,
-        "throughput_out_p50": _percentile(out_series, 50.0),
-        "throughput_out_p95": _percentile(out_series, 95.0),
+        "throughput_out_avg": goodput_avg,  # headline = goodput (excludes retries/duplicates)
+        "throughput_out_p50": _percentile(goodput_series, 50.0),
+        "throughput_out_p95": _percentile(goodput_series, 95.0),
         "throughput_in_avg": in_avg,
-        "goodput_avg": _mean_nonzero(goodput_series),
-        "drain_ratio": out_avg / max(in_avg, 1e-6),
+        "goodput_avg": goodput_avg,
+        "drain_ratio": goodput_avg / max(in_avg, 1e-6),
         "backlog_slope_per_sec": _mean_nonzero(series("system_backlog_slope_per_sec")),
         "rue": _mean_nonzero(series("rue_cluster")),
         "eei": _mean_nonzero(series("eei")),
@@ -414,7 +415,7 @@ def improvement_heatmap(kpis: Dict[str, Dict[str, float]], out_path: Path) -> No
     metrics = [
         ("latency_p50", "Latency p50", True),
         ("latency_p99", "Latency p99", True),
-        ("throughput_out_avg", "Throughput out", False),
+        ("throughput_out_avg", "Goodput (excl. retries)", False),
         ("throughput_in_avg", "Throughput in", False),
         ("drain_ratio", "Drain ratio", False),
         ("rue", "RUE", False),
@@ -521,11 +522,11 @@ def main() -> None:
     bar_group(kpis, "latency_p99", "Tail Latency (p99)", "ms", fig_dir / "latency_p99.png", lower_is_better=True)
 
     # 3. Throughput
-    bar_group(kpis, "throughput_out_avg", "Output Throughput (avg)", "msgs/sec",
+    bar_group(kpis, "throughput_out_avg", "Goodput (avg, excl. retries)", "msgs/sec",
               fig_dir / "throughput_out.png")
     bar_group(kpis, "throughput_in_avg", "Input Throughput (avg)", "msgs/sec",
               fig_dir / "throughput_in.png")
-    bar_group(kpis, "drain_ratio", "Drain Ratio (throughput_out / throughput_in)", "ratio",
+    bar_group(kpis, "drain_ratio", "Drain Ratio (goodput / throughput_in)", "ratio",
               fig_dir / "drain_ratio.png")
 
     # 4. Proprietary KPIs
@@ -545,7 +546,7 @@ def main() -> None:
 
     # 6. Print summary table
     print("\n=== KPI Summary ===")
-    metric_keys = ["latency_p50", "latency_p99", "throughput_out_avg", "throughput_in_avg",
+    metric_keys = ["latency_p50", "latency_p99", "goodput_avg", "throughput_in_avg",
                    "drain_ratio", "rue", "eei", "fpp", "mis", "tlvr",
                    "cpu_util", "mem_util", "net_util"]
     header = f"{'Metric':<28}" + "".join(f"{MODE_LABELS[m]:>16}" for m in MODES if m in kpis)

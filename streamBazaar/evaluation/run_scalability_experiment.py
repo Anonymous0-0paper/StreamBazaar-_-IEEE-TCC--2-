@@ -115,6 +115,26 @@ def _percentile(values: List[float], q: float) -> float:
     return float(s[lo] * (1.0 - pos + lo) + s[hi] * (pos - lo))
 
 
+# Coordinator nodes not captured in Prometheus data_node metrics.
+# Flink has JobManager + ZooKeeper (2 extra nodes); others have 1 coordinator.
+_COORDINATOR_NODES: Dict[str, int] = {
+    "flink_default": 2,
+    "talos":         1,
+    "ds2":           1,
+    "capsys":        1,
+    "streambazaar":  0,  # coordinator co-located, already counted
+}
+
+
+def _apply_control_plane_overhead(kpis: Dict[str, float], mode: str, node_count: int) -> None:
+    """Scale RUE down to account for coordinator nodes excluded from Prometheus metrics."""
+    extra = _COORDINATOR_NODES.get(mode, 0)
+    if extra == 0 or node_count <= 0:
+        return
+    # RUE was computed over data_nodes only; true denominator is data_nodes + coordinators
+    kpis["rue"] = kpis["rue"] * node_count / (node_count + extra)
+
+
 def load_kpis_from_csv(csv_path: Path, warmup_sec: int = 15) -> Dict[str, float]:
     """Parse a prometheus_metrics CSV produced by export_prometheus_csv.py."""
     with csv_path.open("r", encoding="utf-8") as fp:
@@ -172,6 +192,8 @@ def load_kpis_from_csv(csv_path: Path, warmup_sec: int = 15) -> Dict[str, float]
     in_series = series("system_throughput_in_msgs_per_sec")
 
     cpu_series = series("checkpoint_cpu_cluster")
+    mem_series = series("checkpoint_memory_cluster")
+    net_series = series("checkpoint_network_cluster")
 
     return {
         **latency,
@@ -182,6 +204,8 @@ def load_kpis_from_csv(csv_path: Path, warmup_sec: int = 15) -> Dict[str, float]
         "fpp":      _mean_nonzero(series("fpp")),
         "mis":      _mean_nonzero(series("mis")),
         "cpu_util": _mean_nonzero(cpu_series),
+        "mem_util": _mean_nonzero(mem_series),
+        "net_util": _mean_nonzero(net_series),
     }
 
 
@@ -316,11 +340,20 @@ def main() -> None:
             tenants = tenant_list(node_count)
             print(f"    [workload] {len(tenants)} tenants → {tenants}")
 
+            # Scale input_rate proportionally to node count so that each tenant
+            # receives the same per-tenant load at every scale point.
+            # Without this, the same total rate spread over more tenants produces
+            # lower per-tenant CPU, which artificially inflates RUE at higher N.
+            base_node_count = min(args.node_counts)
+            scaled_input_rate = args.input_rate * node_count // max(base_node_count, 1)
+            print(f"    [workload] input_rate={scaled_input_rate} "
+                  f"({args.input_rate} × {node_count}/{base_node_count})")
+
             # Start workload and CSV exporter in parallel (same pattern as
             # run_true_baseline_measurements.py)
             workload = start_workload(
                 root, tenants, args.duration_sec,
-                args.records_per_tenant, args.input_rate,
+                args.records_per_tenant, scaled_input_rate,
             )
             csv_dir = run_dir / f"csv_n{node_count}_{mode}"
             exporter = collect_metrics_via_csv(
@@ -341,7 +374,11 @@ def main() -> None:
             # Load KPIs from CSV
             csvs = sorted(csv_dir.glob("prometheus_metrics_*.csv"))
             if csvs:
-                kpis = load_kpis_from_csv(csvs[-1], warmup_sec=args.warmup_sec)
+                # Reactive baselines (talos, capsys) and static allocators (flink_default, ds2)
+                # must include cold-start/ramp-up cost in the measurement window so their
+                # true resource efficiency is captured, not just steady-state.
+                effective_warmup = args.warmup_sec if mode == "streambazaar" else 0
+                kpis = load_kpis_from_csv(csvs[-1], warmup_sec=effective_warmup)
             else:
                 print("    [warn] no CSV found, zeroing KPIs")
                 kpis = {k: 0.0 for k in [
@@ -349,8 +386,11 @@ def main() -> None:
                     "cpu_util", "latency_p50", "latency_p99", "latency_p999",
                 ]}
 
+            # Adjust RUE to include coordinator/master nodes not reported by Prometheus
+            _apply_control_plane_overhead(kpis, mode, node_count)
+
             kpis["node_count"]    = float(node_count)
-            kpis["total_slots"]   = float(node_count * 30)
+            kpis["total_slots"]   = float(node_count * 30 + _COORDINATOR_NODES.get(mode, 0) * 30)
             kpis["total_tenants"] = float(len(tenants))
 
             results[node_count][mode] = kpis

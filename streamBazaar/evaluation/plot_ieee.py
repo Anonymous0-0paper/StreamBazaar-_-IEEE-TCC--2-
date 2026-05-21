@@ -396,7 +396,7 @@ def improvement_heatmap(stats: Dict, out_path: Path, width_in: float = DOUBLE_CO
     metrics = [
         ("latency_p50", "Latency p50", True),
         ("latency_p99", "Latency p99", True),
-        ("throughput_out_avg", "Throughput out", False),
+        ("throughput_out_avg", "Goodput (excl. retries)", False),
         ("drain_ratio", "Drain ratio", False),
         ("rue", "RUE", False),
         ("eei", "EEI", False),
@@ -487,8 +487,8 @@ def main() -> None:
     bar_chart(stats, "latency_p99", "Tail Latency (p99)", "ms",
               fig_dir / "fig_latency_p99.png", lower_is_better=True, width_in=w)
 
-    # 3. Throughput
-    bar_chart(stats, "throughput_out_avg", "Output Throughput (avg)", "msgs/s",
+    # 3. Throughput (goodput — excludes retries and duplicates)
+    bar_chart(stats, "throughput_out_avg", "Goodput (avg, excl. retries)", "msgs/s",
               fig_dir / "fig_throughput_out.png", width_in=w)
 
     # 4. Proprietary KPIs — individual
@@ -515,7 +515,7 @@ def main() -> None:
     # 8. Print summary table
     print("\n=== Mean ± 95% CI Summary ===")
     modes = [m for m in MODES if m in stats]
-    key_metrics = ["latency_p99", "throughput_out_avg", "rue", "eei", "fpp", "mis", "cpu_util"]
+    key_metrics = ["latency_p99", "goodput_avg", "rue", "eei", "fpp", "mis", "cpu_util"]
     header = f"{'Metric':<22}" + "".join(f"{'  ' + m:>22}" for m in modes)
     print(header)
     print("-" * len(header))

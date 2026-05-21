@@ -16,7 +16,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
       TENANT_IDS: tenant-clickstream,tenant-web,tenant-clickstream-3,tenant-clickstream-4
-      SCHEDULER_MODE: talos
+      SCHEDULER_MODE: flink_default
       COORDINATOR_GROUP_ID: stream-coordinator-node1
       NODE_ID: "1"
       TOTAL_NODES: "4"

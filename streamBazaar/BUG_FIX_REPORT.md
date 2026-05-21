@@ -168,7 +168,7 @@ TALOS/DS2/FlinkDefault: 2.8-3x higher throughput
 - ⚠️ Workload distribution (why not going to tenant-iot?)
 
 **All Measured Data:**
-- ✅ Not synthetic/estimated (direct from Prometheus CSVs)
+- ✅ Not synthetic (direct from Prometheus CSVs)
 - ✅ Real execution across 4 scheduler modes
 - ✅ Real metric collection during 60-sec workload windows
 

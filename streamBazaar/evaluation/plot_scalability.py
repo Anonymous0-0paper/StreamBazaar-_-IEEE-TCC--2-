@@ -286,12 +286,15 @@ def load_per_dataset_kpis(
                         vals.extend(_series(rows, f"checkpoint_tenant_{t}_cpu"))
                     return _mean_nonzero(vals)
 
+                goodput = _avg_tp("_goodput")
                 result[nc][mode][base_ds] = {
                     "latency_p50":    _avg("_p50_ms"),
                     "latency_p99":    _avg("_p99_ms"),
                     "latency_p999":   _avg("_p999_ms"),
                     "throughput_in":  _avg_tp("_in"),
-                    "throughput_out": _avg_tp("_out"),
+                    # Use goodput (excl. retries/duplicates) as the headline throughput metric;
+                    # fall back to raw out only when goodput column is absent/zero.
+                    "throughput_out": goodput if goodput > 1e-12 else _avg_tp("_out"),
                     "cpu_util":       _avg_cpu(),
                     "rue":            cluster_rue,
                     "eei":            cluster_eei,
@@ -520,7 +523,7 @@ def plot_cross_dataset_bar(
 
 def plot_panel(data, ns, modes, out_path) -> None:
     panels = [
-        ("throughput_out", "Throughput\n(norm.)", False,  True),
+        ("throughput_out", "Goodput\n(norm.)", False,  True),
         (None,             "Scale Eff. (%)",      False,  False),
         ("latency_p99",    "Latency p99\n(norm.)", True,  False),
         ("rue",            "RUE\n(norm.)",          False, False),
@@ -571,7 +574,7 @@ def plot_panel(data, ns, modes, out_path) -> None:
 
 def print_summary(data: Dict, ns: List[int], modes: List[str]) -> None:
     metrics = [
-        ("throughput_out", "Throughput (msgs/s)", False),
+        ("throughput_out", "Goodput (msgs/s)", False),
         ("latency_p99",    "Latency p99 (ms)",    True),
         ("rue",            "RUE",                  False),
         ("eei",            "EEI",                  False),
@@ -602,7 +605,7 @@ def print_per_dataset_summary(
     metrics = [
         ("latency_p99",    "Latency p99 (ms)",    True),
         ("latency_p999",   "Latency p999 (ms)",   True),
-        ("throughput_out", "Throughput out",       False),
+        ("throughput_out", "Goodput (excl. retries)", False),
         ("throughput_in",  "Throughput in",        False),
     ]
 
@@ -680,7 +683,7 @@ def main() -> None:
     # ── Aggregate line figures (normalized) ──────────────────────────────────
     plot_metric_vs_nodes(
         data, ns, modes, "throughput_out",
-        "Aggregate Throughput vs Nodes", "Throughput (msgs/s)",
+        "Aggregate Goodput vs Nodes", "Goodput (msgs/s)",
         fig_dir / "fig_throughput_vs_nodes.png",
         add_ideal=True,
     )
@@ -762,7 +765,7 @@ def main() -> None:
                 )
                 plot_per_dataset_line(
                     per_ds, ns, modes, ds, "throughput_out",
-                    "Throughput Out", "msgs/s",
+                    "Goodput (excl. retries)", "msgs/s",
                     ds_dir / f"fig_throughput_{ds}.png",
                     lower_is_better=False,
                 )
@@ -776,7 +779,7 @@ def main() -> None:
                 )
                 plot_per_dataset_bar(
                     per_ds, ns, modes, ds, "throughput_out",
-                    "Throughput Out", "msgs/s",
+                    "Goodput (excl. retries)", "msgs/s",
                     ds_dir / f"fig_throughput_bar_{ds}.png",
                     lower_is_better=False,
                 )
@@ -808,7 +811,7 @@ def main() -> None:
             )
             plot_cross_dataset_bar(
                 per_ds, ns, modes, datasets, "throughput_out",
-                "Throughput Out", "msgs/s",
+                "Goodput (excl. retries)", "msgs/s",
                 fig_dir / "fig_throughput_dataset_bars.png",
                 lower_is_better=False,
             )

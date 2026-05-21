@@ -383,7 +383,7 @@ This file contains:
 - `improvements_vs_flink_default`: KPI deltas
 - `metrics_by_scheduler`: full metric map for each scheduler
 
-**Note:** These are estimated/synthesized baselines, not truly measured. Use Option A for publication.
+**Note:** These are synthesized baselines, not truly measured. Use Option A for publication.
 
 ### 10.3 Comparison Summary
 

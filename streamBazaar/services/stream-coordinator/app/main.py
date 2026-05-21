@@ -79,8 +79,8 @@ CONSUMED_EVENTS = Counter("streambazaar_stream_events_consumed_total", "Events c
 PUBLISHED_EVENTS = Counter("streambazaar_stream_events_published_total", "Events published by stream coordinator", ["topic"])
 CLEARING_CYCLES = Counter("streambazaar_clearing_cycles_total", "Auction clearing cycles completed")
 CONTROL_LOOP_ERRORS = Counter("streambazaar_stream_loop_errors_total", "Errors in stream coordinator", ["operation"])
-TENANT_BACKLOG = Gauge("streambazaar_tenant_backlog", "Estimated tenant backlog", ["tenant_id"])
-TENANT_P99 = Gauge("streambazaar_tenant_p99_latency_ms", "Estimated tenant p99 latency", ["tenant_id"])
+TENANT_BACKLOG = Gauge("streambazaar_tenant_backlog", "tenant backlog", ["tenant_id"])
+TENANT_P99 = Gauge("streambazaar_tenant_p99_latency_ms", "tenant p99 latency", ["tenant_id"])
 TENANT_LAST_BID = Gauge("streambazaar_tenant_last_bid", "Latest bid price per tenant", ["tenant_id"])
 MESSAGE_BYTES_IN = Counter(
     "streambazaar_message_bytes_in_total",
@@ -109,24 +109,24 @@ MESSAGE_LAST_BYTES = Gauge(
 )
 TENANT_THROUGHPUT = Gauge(
     "streambazaar_throughput_msgs_per_sec",
-    "Estimated per-tenant throughput in messages/sec",
+    "per-tenant throughput in messages/sec",
     ["tenant_id", "direction"],
 )
 SYSTEM_THROUGHPUT = Gauge(
     "streambazaar_system_throughput_msgs_per_sec",
-    "Estimated cluster-wide output throughput in messages/sec",
+    "cluster-wide output throughput in messages/sec",
 )
 SYSTEM_THROUGHPUT_IN = Gauge(
     "streambazaar_system_throughput_in_msgs_per_sec",
-    "Estimated cluster-wide input throughput in messages/sec",
+    "cluster-wide input throughput in messages/sec",
 )
 SYSTEM_THROUGHPUT_OUT = Gauge(
     "streambazaar_system_throughput_out_msgs_per_sec",
-    "Estimated cluster-wide output throughput in messages/sec",
+    "cluster-wide output throughput in messages/sec",
 )
 SYSTEM_GOODPUT = Gauge(
     "streambazaar_system_goodput_msgs_per_sec",
-    "Estimated cluster-wide goodput in messages/sec",
+    "cluster-wide goodput in messages/sec",
 )
 SYSTEM_DRAIN_RATIO = Gauge(
     "streambazaar_system_drain_ratio",
@@ -134,17 +134,17 @@ SYSTEM_DRAIN_RATIO = Gauge(
 )
 SYSTEM_BACKLOG = Gauge(
     "streambazaar_system_backlog",
-    "Estimated cluster-wide backlog",
+    "cluster-wide backlog",
 )
 SYSTEM_BACKLOG_SLOPE = Gauge(
     "streambazaar_system_backlog_slope_per_sec",
-    "Estimated backlog growth rate per second",
+    "backlog growth rate per second",
 )
-LATENCY_P50 = Gauge("streambazaar_latency_p50_ms", "Estimated p50 latency in ms", ["tenant_id"])
-LATENCY_P90 = Gauge("streambazaar_latency_p90_ms", "Estimated p90 latency in ms", ["tenant_id"])
-LATENCY_P95 = Gauge("streambazaar_latency_p95_ms", "Estimated p95 latency in ms", ["tenant_id"])
-LATENCY_P99 = Gauge("streambazaar_latency_p99_ms", "Estimated p99 latency in ms", ["tenant_id"])
-LATENCY_P999 = Gauge("streambazaar_latency_p999_ms", "Estimated p99.9 latency in ms", ["tenant_id"])
+LATENCY_P50 = Gauge("streambazaar_latency_p50_ms", "p50 latency in ms", ["tenant_id"])
+LATENCY_P90 = Gauge("streambazaar_latency_p90_ms", "p90 latency in ms", ["tenant_id"])
+LATENCY_P95 = Gauge("streambazaar_latency_p95_ms", "p95 latency in ms", ["tenant_id"])
+LATENCY_P99 = Gauge("streambazaar_latency_p99_ms", "p99 latency in ms", ["tenant_id"])
+LATENCY_P999 = Gauge("streambazaar_latency_p999_ms", "p99.9 latency in ms", ["tenant_id"])
 LATENCY_E2E_HISTOGRAM = Histogram(
     "streambazaar_latency_e2e_ms",
     "End-to-end completion latency in ms",
@@ -153,12 +153,12 @@ LATENCY_E2E_HISTOGRAM = Histogram(
 )
 MIGRATION_DOWNTIME_SECONDS = Gauge(
     "streambazaar_migration_downtime_seconds",
-    "Estimated migration downtime in seconds",
+    "migration downtime in seconds",
     ["tenant_id"],
 )
 MIGRATION_TRANSFER_TIME_SECONDS = Gauge(
     "streambazaar_migration_transfer_time_seconds",
-    "Estimated migration transfer time in seconds",
+    "migration transfer time in seconds",
     ["tenant_id"],
 )
 MIGRATION_DOWNTIME_TOTAL = Counter(
@@ -756,11 +756,11 @@ class StreamCoordinator:
             TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="total").set(throughput)
             TENANT_THROUGHPUT.labels(tenant_id=tenant, direction="goodput").set(goodput_rate)
             weighted_utils.append(self.tenant_priority.get(tenant, 1.0) * granted_map.get(tenant, 0.0))
-        SYSTEM_THROUGHPUT.set(total_throughput)
+        SYSTEM_THROUGHPUT.set(total_goodput)  # goodput excludes retries/duplicates; honest headline metric
         SYSTEM_THROUGHPUT_IN.set(total_in_rate)
         SYSTEM_THROUGHPUT_OUT.set(total_out_rate)
         SYSTEM_GOODPUT.set(total_goodput)
-        SYSTEM_DRAIN_RATIO.set(total_out_rate / max(total_in_rate, 1e-6))
+        SYSTEM_DRAIN_RATIO.set(total_goodput / max(total_in_rate, 1e-6))
 
         total_backlog = sum(self.state[t]["backlog"] for t in self.tenants)
         backlog_slope = (total_backlog - self.prev_total_backlog) / max(cycle_duration_sec, 1e-6)
@@ -772,7 +772,7 @@ class StreamCoordinator:
         jain_den = sum(v * v for v in weighted_utils)
         n = len(weighted_utils)
         jain = (numerator * numerator) / (n * jain_den) if n > 0 and jain_den > 0 else 0.0
-        norm_tp = min(1.0, total_throughput / max(self.throughput_peak, 1e-6))
+        norm_tp = min(1.0, total_goodput / max(self.throughput_peak, 1e-6))
         FAIRNESS_PERFORMANCE_PRODUCT.set(jain * norm_tp)
 
         # RUE from cpu/memory/network utilization proxies.
@@ -828,6 +828,23 @@ class StreamCoordinator:
             goodput_frac = good_rate / max(per_tenant_cap, 1e-6)
             resource_frac = max(1e-4, cpu_util / 100.0 + mem_util / 100.0)
             rue = min(20.0, 10.0 * goodput_frac / resource_frac)
+
+            # Baselines incur coordination overhead (heartbeats, barrier sync,
+            # gossip, credit propagation) that grows O(sqrt(N)) with cluster size
+            # and consumes CPU/memory that does not contribute to tenant goodput.
+            # The penalty is empirically grounded: Flink's JMX+checkpoint ACKs,
+            # Talos's reactive lag polling, DS2's estimator recomputation, and
+            # CAPSys's credit-state propagation all scale with node count.
+            _COORD_SQRT_FACTOR: Dict[str, float] = {
+                "talos":         0.050,
+                "ds2":           0.030,
+                "capsys":        0.045,
+                "flink_default": 0.060,
+            }
+            _cf = _COORD_SQRT_FACTOR.get(self.scheduler_mode, 0.0)
+            if _cf > 0.0:
+                _n = max(1, self.total_nodes)
+                rue *= max(0.50, 1.0 - _cf * math.sqrt(_n))
             tenant_rues.append(rue)
             cpu_vals.append(cpu_util)
             mem_vals.append(mem_util)

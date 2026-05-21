@@ -168,7 +168,7 @@ CSV exports include latency percentiles, throughput, KPIs, checkpoint utilizatio
 - **Latency:** Actual improvements are **much smaller** than synthesized projections
 - **Throughput:** Actual StreamBazaar throughput is **lower** than projected (2.8x gap)
 - **RUE:** True measured RUE advantage aligns with synthesis (8-12% better)
-- **Synthesis Accuracy:** Projection model overestimated StreamBazaar latency gains and underestimated throughput trade-off
+- **Synthesis Accuracy:** Projection model overstated StreamBazaar latency gains and understated throughput trade-off
 
 ---
 
