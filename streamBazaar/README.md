@@ -54,21 +54,132 @@ Paper mapping details are in `PAPER_ALIGNMENT.md`.
 - **Baseline comparison metrics** (`evaluation/baseline_comparison.py`):
 	- Resource, latency, throughput, and Jain fairness comparisons vs YARN baseline
 
-## 2) Prerequisites
+## 2) Prerequisites & Full Setup Guide
 
-- Docker + Docker Compose plugin
-- Python 3.10+ (for local scripts)
-- `curl`
+Before running any experiment, complete every step in this section in order.
 
-Optional (for local script setup):
+---
+
+### Step 1 — Install Docker Engine & Docker Compose
+
+**Ubuntu / Debian:**
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+# Remove old versions if any
+sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+
+# Install dependencies
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key and repo
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine + Compose plugin
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Allow running Docker without sudo (log out and back in after this)
+sudo usermod -aG docker $USER
+```
+
+**macOS** — install [Docker Desktop](https://www.docker.com/products/docker-desktop/) which includes the Compose plugin.
+
+**Windows** — install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/) (WSL 2 backend recommended).
+
+Verify:
+
+```bash
+docker --version          # e.g. Docker version 25.x
+docker compose version    # e.g. Docker Compose version v2.x
+```
+
+---
+
+### Step 2 — Install Python 3.10+
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv
+python3 --version   # must be 3.10 or higher
+```
+
+**macOS (via Homebrew):**
+
+```bash
+brew install python@3.11
+python3 --version
+```
+
+**Windows** — download the installer from [python.org](https://www.python.org/downloads/) and check "Add Python to PATH" during install.
+
+---
+
+### Step 3 — Install curl & git
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install -y curl git
+
+# macOS (curl and git are pre-installed; update via Homebrew if needed)
+brew install curl git
+```
+
+---
+
+### Step 4 — Clone the Repository
+
+```bash
+git clone <your-repo-url>
+cd streamBazaar
+```
+
+---
+
+### Step 5 — Create & Activate a Python Virtual Environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\activate           # Windows PowerShell
+```
+
+---
+
+### Step 6 — Install Python Dependencies
+
+```bash
+pip install --upgrade pip
 pip install -r requirements-dev.txt -r evaluation/requirements.txt
 ```
 
-The local scripts now use `kafka-python` to publish workload events to Kafka topics.
+Key packages installed include `kafka-python`, `requests`, `influxdb-client`, `prometheus-api-client`, `matplotlib`, `numpy`, and `scipy`.
+
+---
+
+### Step 7 — Verify Docker Resources (Recommended)
+
+StreamBazaar runs ~12 containers. Ensure Docker has sufficient resources:
+
+- **CPU**: 4+ cores
+- **RAM**: 8 GB minimum (16 GB recommended for paper-grade runs)
+- **Disk**: 10 GB free
+
+On Docker Desktop, adjust limits under **Settings → Resources**.
+
+---
+
+After completing all steps above, proceed to Section 3 (Start The Stack).
+
+The local scripts use `kafka-python` to publish workload events to Kafka topics.
 
 ## 2.1) Quick Start (First Time Setup)
 
@@ -141,7 +252,95 @@ The script writes `evaluation_report_YYYYMMDD_HHMMSS.json` in `streamBazaar/`.
 Note: Earlier versions of this scaffold wrote placeholder `null` metrics in smoke reports.
 The current version collects/writes/query metrics before report generation, so fields are populated.
 
-## 5.1) Run Reproducible Paper Experiments
+## 5.1) Run Scalability Experiment
+
+The scalability experiment measures StreamBazaar performance (latency, throughput, resource utilization) across increasing node counts, reproducing the paper's scalability evaluation.
+
+### Prerequisites
+
+Make sure the stack is running and Python dependencies are installed:
+
+```bash
+# From streamBazaar/
+docker compose up -d --build
+./scripts/wait-for-services.sh
+
+# Install evaluation dependencies if not already done
+pip install -r evaluation/requirements.txt
+```
+
+### Step-by-Step Guide
+
+**Step 1 — Navigate to the project root (`streamBazaar/`):**
+
+```bash
+cd streamBazaar
+```
+
+**Step 2 — (Optional) Activate your virtual environment:**
+
+```bash
+source .venv/bin/activate
+```
+
+**Step 3 — Run the scalability experiment:**
+
+```bash
+python3 evaluation/run_scalability_experiment.py \
+    --node-counts 1 2 4 \
+    --duration-sec 60 \
+    --warmup-sec 5
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--node-counts 1 2 4` | Node counts to benchmark (runs one experiment per count) |
+| `--duration-sec 60` | Steady-state measurement window per node count (seconds) |
+| `--warmup-sec 5` | Warm-up period before metrics are collected (seconds) |
+
+**Step 4 — Wait for results.** The script runs three sequential experiments (1 node → 2 nodes → 4 nodes). Each takes `warmup-sec + duration-sec` seconds, so the full run above takes approximately **3 × 65 = ~195 seconds**.
+
+**Step 5 — Find the output.** Results are written to:
+
+```
+evaluation/results/scalability/
+├── scalability_report_YYYYMMDD_HHMMSS.json   ← aggregated metrics per node count
+└── figures/
+    ├── scalability_latency.png
+    ├── scalability_throughput.png
+    └── scalability_resource_util.png
+```
+
+### Customizing the Run
+
+Longer paper-grade run (matches Section 5 of the paper):
+
+```bash
+python3 evaluation/run_scalability_experiment.py \
+    --node-counts 1 2 4 8 16 \
+    --duration-sec 120 \
+    --warmup-sec 30
+```
+
+Quick smoke test (fast sanity check):
+
+```bash
+python3 evaluation/run_scalability_experiment.py \
+    --node-counts 1 2 \
+    --duration-sec 15 \
+    --warmup-sec 5
+```
+
+### Troubleshooting
+
+- **Services not ready**: run `./scripts/wait-for-services.sh` before the experiment.
+- **Missing dependencies**: run `pip install -r evaluation/requirements.txt`.
+- **Port conflicts**: verify no other process occupies ports `18080–18088`, `19090`, `19092`.
+- **Permission denied on script**: run `chmod +x evaluation/run_scalability_experiment.py`.
+
+---
+
+## 5.3) Run Reproducible Paper Experiments
 
 This runs multi-round experiments with warmup + steady-state windows, stores raw reports,
 and automatically generates aggregate statistics and figures.
@@ -170,7 +369,7 @@ Outputs (each experiment run creates its own folder):
   - `evaluation/results/raw/exp_.../figures/cpu_avg.png`
   - `evaluation/results/raw/exp_.../figures/memory_avg.png`
 
-## 5.2) Flink Streaming Scheduler Integration
+## 5.4) Flink Streaming Scheduler Integration
 
 The `flink-integration/` module implements a native Apache Flink job that replaces the REST-based stream-coordinator with a true streaming control loop. This is the paper's intended architecture: a single unified Flink job orchestrating pricing → auction → allocation → migration natively on the streaming cluster.
 
@@ -207,7 +406,7 @@ docker logs streamBazaar-flink-jobmanager-1
 curl -X PATCH http://localhost:18088/v1/jobs/JOB_ID?mode=cancel
 ```
 
-## 5.3) Dataset Setup For Real-Data Evaluation
+## 5.5) Dataset Setup For Real-Data Evaluation
 
 For automatic downloads of real evaluation datasets, configure credentials before your first experiment run.
 
